@@ -12,6 +12,6 @@ apps/web/.next/
 apps/web/node_modules/
 apps/docs/node_modules/
 apps/web/out/
+*.tsbuildinfo
 .idea/
 .vscode/
-

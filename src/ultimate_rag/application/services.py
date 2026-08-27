@@ -19,6 +19,7 @@
 
 import hashlib
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import PurePath
 from uuid import uuid4
@@ -321,25 +322,68 @@ class RAGService:
         没有召回结果时不会调用 LLM，直接返回可解释的“无法确定”。
         """
 
-        # 阶段 1 — Retrieve：保留完整召回结果，最终随答案一起返回供 Retrieval Playground 调试。
-        # 没有证据时跳过付费 LLM 调用，并阻止模型依靠自身参数知识生成不可追溯的答案。
+        user_prompt, citations, results = await self._prepare_generation(
+            knowledge_base_id, question, top_k
+        )
+        if user_prompt is None:
+            return "根据当前知识库无法确定。", [], []
+
+        answer = await self._llm.generate(self.SYSTEM_PROMPT, user_prompt)
+        return answer, citations, results
+
+    async def stream_answer(
+        self,
+        knowledge_base_id: str,
+        question: str,
+        top_k: int,
+    ) -> tuple[AsyncIterator[str], list[Citation], list[RetrievalResult]]:
+        """准备检索证据并返回模型原生文本流、引用与召回结果。
+
+        Retrieval 必须在 HTTP 响应开始前完成。这样知识库不存在或向量服务不可用时，
+        FastAPI 仍能返回正常的结构化错误状态，而不是已经发送 ``200`` 后才在流中失败。
+
+        Returns:
+            三元组：异步文本增量、稳定 Citation 列表、完整 RetrievalResult 列表。
+            无召回结果时返回只产生一次固定降级答案的本地流，不调用付费 LLM。
+        """
+
+        user_prompt, citations, results = await self._prepare_generation(
+            knowledge_base_id, question, top_k
+        )
+        if user_prompt is None:
+            return self._fallback_stream(), [], []
+        return self._llm.stream(self.SYSTEM_PROMPT, user_prompt), citations, results
+
+    async def _prepare_generation(
+        self,
+        knowledge_base_id: str,
+        question: str,
+        top_k: int,
+    ) -> tuple[str | None, list[Citation], list[RetrievalResult]]:
+        """共享非流式与流式问答的 Retrieve、Context 和 Citation 准备逻辑。
+
+        把准备阶段集中在一个函数，可防止两个传输模式逐渐使用不同的上下文预算、引用顺序
+        或 Prompt 防注入规则；模型调用仍留在公开方法中，使完整生成和流式生成意图清晰。
+        """
+
+        # 阶段 1 — Retrieve：完整结果最终随答案返回，供 Retrieval Playground 调试。
+        # 没有证据时跳过付费 LLM，并阻止模型依赖参数知识生成不可追溯的答案。
         results = await self._retrieval.search(knowledge_base_id, question, top_k)
         if not results:
-            return "根据当前知识库无法确定。", [], []
+            return None, [], []
 
         # 阶段 2 — Build Context：按召回顺序和字符预算确定性地编号、拼接证据。
         # 选择哪些 Chunk 进入上下文属于应用规则，不能交给 LLM 在生成时隐式决定。
         context = self._context_builder.build(results)
 
-        # 阶段 3 — Generate：标签把不可信知识与用户问题分隔；SYSTEM_PROMPT 明确要求
-        # 模型只把标签内容当作证据，忽略文档内部试图覆盖系统规则的 Prompt Injection。
+        # XML 风格标签把不可信知识与用户问题分隔；SYSTEM_PROMPT 同时要求模型把标签内容
+        # 仅视为证据，忽略文档内部试图覆盖系统约束的 Prompt Injection 指令。
         user_prompt = (
             f"<knowledge_context>\n{context}\n</knowledge_context>\n\n用户问题：{question}"
         )
-        answer = await self._llm.generate(self.SYSTEM_PROMPT, user_prompt)
 
-        # 阶段 4 — Cite：Citation 从受控 RetrievalResult 构造，不解析 LLM 自由文本。
-        # 即使模型写错 [来源 N]，后端仍保留稳定 document_id/chunk_id 供用户追溯原文。
+        # 阶段 3 — Cite：Citation 从受控 RetrievalResult 构造，不解析 LLM 自由文本。
+        # 即使模型写错 [来源 N]，后端仍保留稳定 ID，供用户回到 Chunk 和原文定位。
         citations = [
             Citation(
                 document_id=result.document_id,
@@ -349,7 +393,12 @@ class RAGService:
             )
             for result in results
         ]
-        return answer, citations, results
+        return user_prompt, citations, results
+
+    @staticmethod
+    async def _fallback_stream() -> AsyncIterator[str]:
+        """把无证据降级文案包装为同一异步流接口。"""
+        yield "根据当前知识库无法确定。"
 
 
 class DocumentLifecycleService:

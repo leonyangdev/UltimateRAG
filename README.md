@@ -62,7 +62,7 @@ Domain Ports
 - 阿里云百炼 OpenAI 兼容 API
   - Embedding 默认 `text-embedding-v4`，1024 维
   - LLM 默认 `qwen-plus`
-- Next.js 16、React 19、TypeScript
+- Next.js 16、React 19、TypeScript、Tailwind CSS 4、shadcn/ui、AI SDK
 - uv、pytest、Ruff、Mypy
 
 ## 快速开始：Docker Compose

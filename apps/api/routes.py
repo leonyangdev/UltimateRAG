@@ -1,11 +1,30 @@
 """UltimateRAG V1 HTTP 路由。
 
-路由只负责输入验证、调用应用服务和响应映射，不包含数据库、对象存储或 Prompt 业务逻辑。
+模块职责：
+    验证 HTTP 输入、调用应用服务，并把领域结果映射为普通 JSON 或 AI SDK UI Message Stream。
+
+架构边界：
+    路由不包含数据库、对象存储、向量检索或 Prompt 业务逻辑。流式端点也只做传输编码，
+    模型供应商的增量响应由 ``LLMClient`` 适配器处理。
+
+流式协议：
+    ``/api/chat/stream`` 使用 AI SDK Data Stream Protocol 的 SSE 表示。除答案文本外，
+    Citation 与 RetrievalResult 通过有类型的 ``data-retrieval`` Part 同消息返回，
+    前端不需要在流结束后再发一次请求补取证据。
+
+注意事项：
+    检索在 StreamingResponse 建立前完成，因此资源缺失与检索异常仍能返回结构化 HTTP 状态；
+    LLM 在响应开始后的故障只能编码为 ``error`` Part，不能再修改已经发送的状态码。
 """
 
+import json
+import logging
+from collections.abc import AsyncIterator
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import APIRouter, File, Request, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 
 from api.container import Container
 from api.schemas import (
@@ -20,6 +39,16 @@ from api.schemas import (
 )
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
+
+
+def _ui_stream_event(payload: dict[str, object]) -> str:
+    """把一个 AI SDK UI Message Chunk 编码为独立 SSE 事件。
+
+    ``ensure_ascii=False`` 保留中文可读性；紧凑分隔符减少高频 text-delta 的传输开销。
+    每个事件必须以两个换行结束，否则浏览器不会认为这个 SSE 事件已经完成。
+    """
+    return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
 def container(request: Request) -> Container:
@@ -136,4 +165,78 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         answer=answer,
         citations=[CitationResponse.from_domain(value) for value in citations],
         retrieval_results=[RetrievalResultResponse.from_domain(value) for value in results],
+    )
+
+
+@router.post("/chat/stream")
+async def stream_chat(payload: ChatRequest, request: Request) -> StreamingResponse:
+    """以 AI SDK UI Message Stream 执行可追溯的流式 RAG 问答。
+
+    检索和 Citation 构造先于响应开始，这使知识库不存在、Embedding 失败或 Milvus 不可用时
+    仍能走统一 FastAPI 异常映射。模型增量随后直接透传为 ``text-delta``，没有前端假流式。
+
+    Args:
+        payload: 知识库范围、自然语言问题与召回上限。
+        request: FastAPI 请求，用于读取 Lifespan 已装配的应用服务。
+
+    Returns:
+        ``text/event-stream`` 响应。首个数据 Part 携带 Citation 与召回证据，随后发送答案增量。
+    """
+
+    await container(request).repository.get_knowledge_base(payload.knowledge_base_id)
+    answer_stream, citations, results = await container(request).rag.stream_answer(
+        payload.knowledge_base_id, payload.query, payload.top_k
+    )
+
+    # Evidence 在模型生成前已经稳定。通过自定义 data Part 与同一 assistant message 绑定，
+    # 前端即使在答案仍生成时也能展示“依据了哪些 Chunk”，且无需维护第二套请求状态。
+    retrieval_data = {
+        "citations": [
+            CitationResponse.from_domain(value).model_dump(mode="json") for value in citations
+        ],
+        "retrieval_results": [
+            RetrievalResultResponse.from_domain(value).model_dump(mode="json") for value in results
+        ],
+    }
+    message_id = f"msg-{uuid4()}"
+    text_id = f"text-{uuid4()}"
+
+    async def event_stream() -> AsyncIterator[str]:
+        """按 AI SDK 要求维护 start/text/finish 事件顺序。"""
+
+        yield _ui_stream_event({"type": "start", "messageId": message_id})
+        yield _ui_stream_event({"type": "start-step"})
+        yield _ui_stream_event({"type": "data-retrieval", "data": retrieval_data})
+        yield _ui_stream_event({"type": "text-start", "id": text_id})
+
+        try:
+            async for delta in answer_stream:
+                yield _ui_stream_event({"type": "text-delta", "id": text_id, "delta": delta})
+        except Exception:
+            # 此时 200 状态和部分内容可能已经送达，无法再交给普通异常 Handler。
+            # 日志保留完整堆栈用于排查，浏览器只收到稳定文案，避免泄漏供应商响应或凭据。
+            logger.exception(
+                "Streaming RAG generation failed",
+                extra={"knowledge_base_id": payload.knowledge_base_id},
+            )
+            yield _ui_stream_event({"type": "text-end", "id": text_id})
+            yield _ui_stream_event({"type": "error", "errorText": "生成过程中断，请稍后重试。"})
+            yield "data: [DONE]\n\n"
+            return
+
+        yield _ui_stream_event({"type": "text-end", "id": text_id})
+        yield _ui_stream_event({"type": "finish-step"})
+        yield _ui_stream_event({"type": "finish", "finishReason": "stop"})
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            # Nginx 默认可能缓冲小响应；关闭代理缓冲才能让 token 及时抵达浏览器。
+            "X-Accel-Buffering": "no",
+            "x-vercel-ai-ui-message-stream": "v1",
+        },
     )

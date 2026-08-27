@@ -3,7 +3,7 @@
 协议由应用层依赖、外围适配器实现；这里只描述当前 V1 真实需要的行为，不预设未来插件运行时。
 """
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Protocol
 
 from ultimate_rag.domain.models import (
@@ -104,4 +104,12 @@ class LLMClient(Protocol):
 
     async def generate(self, system_prompt: str, user_prompt: str) -> str:
         """基于系统约束和用户消息生成非空文本答案。"""
+        ...
+
+    def stream(self, system_prompt: str, user_prompt: str) -> AsyncIterator[str]:
+        """按模型实际产生的增量顺序返回非空文本片段。
+
+        流式能力属于模型端口而不是 HTTP 层：这样 Route 只负责把增量编码为传输协议，
+        不需要知道 OpenAI-Compatible SDK 的 Chunk 结构，也不会用假逐字动画掩盖模型延迟。
+        """
         ...

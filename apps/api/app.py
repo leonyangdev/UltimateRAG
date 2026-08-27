@@ -168,6 +168,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # AI SDK 用该响应头识别 UI Message Stream；跨域开发时浏览器只有在此显式暴露后
+    # 才允许前端读取，避免把合法 SSE 响应误判为普通文本流。
+    expose_headers=["x-vercel-ai-ui-message-stream"],
 )
 app.include_router(router)
 
