@@ -2179,44 +2179,369 @@ Consequences
 
 ---
 
-# 44. Git 操作规范
+# 44. Git 与代码提交规范
 
-除非用户明确要求，否则不要进行危险 Git 操作。
+本节规范从工作区检查、暂存、Commit Message 到提交后验证的完整流程。
 
-禁止擅自：
+提交的目标不是把当前文件“保存进 Git”，而是形成：
+
+> **范围清晰、原因明确、可以独立审查、可以安全回滚的项目历史。**
+
+## 44.1 Git 安全边界
+
+除非用户明确要求并确认影响范围，否则禁止：
 
 ```text
-reset --hard
-force push
-删除用户修改
-覆盖未提交代码
+git reset --hard
+git push --force
+git push --force-with-lease
+git clean -fd
+git checkout -- <file>
+git restore <file>
+删除或覆盖用户未提交修改
+修改已经发布的 Git 历史
 ```
 
-任务结束前建议检查：
+AI Agent 还必须遵守：
+
+1. 用户没有明确要求“提交”时，不得自行创建 Commit
+2. 用户要求 Commit 不等于要求 Push；没有明确授权时不得推送远端
+3. 不得擅自 Amend、Rebase、Cherry-pick 或合并分支
+4. 不得使用 `--no-verify` 绕过 Git Hook
+5. 工作区不干净时，必须区分用户原有修改与本次任务修改
+6. 不得为了获得干净工作区而删除、覆盖或隐藏无法确认归属的修改
+
+## 44.2 提交粒度
+
+每个 Commit 应只表达一个明确的修改原因。
+
+推荐：
+
+```text
+一个 Bug Fix + 对应 Regression Test
+一个 Feature + 对应测试与必要文档
+一次有明确目的的 Refactor + 行为不变验证
+一次数据库结构变化 + 对应 Alembic Migration
+一次依赖调整 + pyproject.toml 与 uv.lock
+```
+
+不推荐把以下无关内容混在一个 Commit：
+
+```text
+Feature + 无关代码格式化
+Bug Fix + 大规模重构
+业务代码 + 临时调试文件
+后端接口 + 无关前端样式调整
+依赖升级 + 无关功能开发
+多个没有共同原因的 Bug Fix
+```
+
+判断标准：
+
+> 如果这个 Commit 被单独 Revert，是否只撤销一个完整且明确的行为变化？
+
+同一行为所需的生产代码、测试、Migration、配置示例和文档应放在同一个 Commit 中，避免产生“代码已提交但测试或迁移留到下一个 Commit”的中间状态。
+
+## 44.3 暂存规范
+
+提交前先检查整个工作区：
 
 ```bash
+git status --short
 git diff
-git status
+```
+
+工作区存在其他修改时，应使用明确路径暂存本次文件：
+
+```bash
+git add src/ultimate_rag/application/services.py
+git add tests/unit/test_ingestion_service.py
+```
+
+不要在无法确认工作区全部修改归属时直接使用：
+
+```bash
+git add .
+git add -A
+```
+
+暂存后必须再次检查真正会进入 Commit 的内容：
+
+```bash
+git diff --cached --stat
+git diff --cached
 ```
 
 确认：
 
-- 没有无关文件
-- 没有 Secret
-- 没有 Cache
-- 没有模型文件
-- 没有本地环境垃圾文件
+- 暂存内容只属于当前任务
+- 没有遗漏配套测试、Migration、配置示例或文档
+- 没有把用户的其他未完成工作一起提交
+- 没有 Secret、Cache、日志、模型文件、构建产物或本地环境垃圾
+- 没有临时 `print()`、调试断点、无原因的 TODO/FIXME 或注释掉的旧代码
+- Rename、Delete 和新增文件都是预期行为
 
-Commit Message 应说明：
+## 44.4 Commit Message 格式
 
-> 为什么做这个修改。
+UltimateRAG 使用 Conventional Commits 风格：
 
-而不是只写：
+```text
+<type>(<scope>): <summary>
+
+<body>
+
+<footer>
+```
+
+其中只有第一行是必需的。简单修改可以省略 Body 和 Footer，复杂修改必须解释背景与关键取舍。
+
+### Type
+
+允许使用：
+
+| Type | 使用场景 |
+|---|---|
+| `feat` | 增加用户可见的新能力 |
+| `fix` | 修复错误行为或数据问题 |
+| `refactor` | 不改变外部行为的代码结构调整 |
+| `perf` | 有数据依据的性能改进 |
+| `test` | 只增加或调整测试 |
+| `docs` | 只修改文档或代码注释规范 |
+| `build` | 构建系统、镜像、打包配置变化 |
+| `ci` | CI/CD 工作流变化 |
+| `chore` | 不属于以上类型的维护工作 |
+| `style` | 只修改格式，不改变语义 |
+| `revert` | 撤销一个已有 Commit |
+
+禁止使用含义模糊的 Type，例如：
+
+```text
+update
+change
+misc
+other
+```
+
+### Scope
+
+Scope 应表达主要受影响的业务或架构模块，保持简短、稳定。
+
+推荐 Scope：
+
+```text
+domain
+ingestion
+parser
+chunker
+embedding
+vectorstore
+retrieval
+generation
+evaluation
+api
+db
+storage
+web
+config
+deps
+docs
+agents
+```
+
+不确定 Scope 时可以省略，不要为了满足格式创造含义模糊的 Scope。
+
+### Summary
+
+Summary 必须：
+
+1. 使用简体中文描述完成后的结果
+2. 优先说明用户行为、业务约束或修复效果
+3. 使用动宾结构，不写过程流水账
+4. 不以句号结尾
+5. 建议控制在 72 个字符以内
+6. 避免“更新代码”“修复问题”“调整文件”等无法独立理解的表达
+
+推荐：
+
+```text
+feat(ingestion): 支持 Markdown 文档同步摄取
+fix(ingestion): 仅在向量索引成功后标记文档可用
+fix(chunker): 避免超长段落重复叠加 overlap
+refactor(api): 将 HTTP 入口迁移到独立应用包
+docs(agents): 完善学习型代码注释规范
+test(retrieval): 覆盖知识库隔离的检索行为
+build(deps): 升级 OpenAI SDK 并同步锁文件
+```
+
+不推荐：
 
 ```text
 update files
 fix code
+修改了一些问题
+feat: 完成开发
+chore: changes
 ```
+
+## 44.5 Commit Body
+
+以下情况必须编写 Body：
+
+- 修改跨越多个模块或存储系统
+- 涉及安全、状态一致性、幂等或事务边界
+- 修改数据库 Schema、API 契约或配置行为
+- 引入、移除或升级重要依赖
+- 选择了一种存在明显 Trade-off 的技术方案
+- 测试未运行、无法运行或存在已知失败
+- 单看 Summary 无法理解为什么需要这个修改
+
+Body 应重点说明：
+
+```text
+问题或需求背景
+为什么采用当前实现
+重要行为与边界
+被放弃的主要方案及原因（确有评估时）
+风险、兼容性和迁移要求
+验证方式或未验证原因
+```
+
+推荐示例：
+
+```text
+fix(ingestion): 仅在向量索引成功后标记文档可用
+
+文档此前可能在 Milvus 写入完成前进入 READY，导致检索到不完整索引。
+现在按 PARSING、CHUNKING、EMBEDDING、INDEXING 顺序记录状态，并将
+READY 保留为 PostgreSQL Chunk 和 Milvus 向量均持久化后的最终状态。
+
+失败时保留 MinIO 原文件和 FAILED 文档事实，便于排查与后续重建。
+```
+
+Body 不应只是重复文件列表或 Summary。
+
+## 44.6 Footer、Issue 与 Breaking Change
+
+关联 Issue 时使用：
+
+```text
+Refs: #123
+Closes: #123
+```
+
+只有 Commit 合并后应自动关闭 Issue 时才使用 `Closes`。
+
+存在 Breaking Change 时，必须：
+
+1. 在 Type 或 Scope 后添加 `!`
+2. 在 Footer 中使用 `BREAKING CHANGE:` 说明影响和迁移方法
+3. 同步更新所有调用方、测试和迁移文档
+
+示例：
+
+```text
+feat(api)!: 统一文档上传响应结构
+
+BREAKING CHANGE: POST /documents 不再返回旧版 data 包装层。
+客户端需要直接读取 document_id、status 和 filename 字段。
+```
+
+除非用户明确允许 Breaking Change，否则不得仅通过 Commit Message 宣告破坏兼容性。
+
+## 44.7 提交前验证
+
+默认至少执行：
+
+```bash
+git diff --check
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy
+uv run pytest
+```
+
+根据修改范围追加：
+
+```text
+API 变化：验证 Request、Response、Status Code 和 Error Mapping
+数据库变化：检查 Alembic Upgrade/Downgrade 和数据兼容性
+依赖变化：确认 pyproject.toml 与 uv.lock 同步
+配置变化：检查 .env.example、Compose 和部署文档
+前端变化：运行前端 Lint、Type Check、Test 和 Build
+外部适配器变化：运行对应 Integration Test 或明确说明未运行原因
+```
+
+如果某项验证因环境限制无法运行，必须在交付说明和必要的 Commit Body 中明确：
+
+```text
+没有运行什么
+为什么无法运行
+已经完成哪些替代验证
+仍然存在什么风险
+```
+
+禁止在测试失败时写“全部验证通过”。
+
+## 44.8 提交内容安全检查
+
+禁止提交：
+
+```text
+.env
+真实 API Key、Password、Token、Cookie、Credential
+生产连接字符串
+完整 Prompt 或用户文档正文的调试日志
+Embedding Vector 或模型权重
+数据库 Dump
+IDE 本地配置
+Python Cache
+测试临时输出
+构建产物
+与任务无关的大文件
+```
+
+`.env.example` 只能包含安全占位值，不能包含可用凭据。
+
+新增文件或依赖后，应检查：
+
+- `.gitignore` 是否覆盖本地生成物
+- 文件大小是否合理
+- License 是否允许使用
+- 是否意外引入大量传递依赖
+- 日志、异常和 Fixture 是否包含敏感业务内容
+
+## 44.9 提交后的检查
+
+Commit 创建后必须检查：
+
+```bash
+git status --short
+git show --stat --oneline HEAD
+```
+
+确认：
+
+- Commit 已包含预期文件
+- 工作区剩余修改都是明确未提交的其他工作
+- Commit Message 与实际 Diff 一致
+- 没有因为 Commit 而丢失用户修改
+
+如果发现提交内容错误，不得擅自 Amend 或 Reset。AI Agent 应先说明问题，并根据用户授权选择追加修复 Commit 或修改历史。
+
+## 44.10 AI Agent 提交说明
+
+AI Agent 完成 Commit 后，应向用户报告：
+
+```text
+Commit Hash
+Commit Message
+包含的主要修改
+验证结果
+工作区是否仍有未提交修改
+是否尚未 Push
+```
+
+不要只回复“已提交”。
 
 ---
 
