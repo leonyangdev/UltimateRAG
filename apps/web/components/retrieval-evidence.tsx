@@ -27,7 +27,7 @@ export function RetrievalEvidence({
         <span className="flex items-center gap-2">
           <BookOpen className="size-4 text-primary" />
           检索证据
-          <Badge variant="secondary" className="rounded-md font-mono text-[10px]">
+          <Badge variant="secondary" className="rounded-md font-mono text-sm">
             TOP {results.length}
           </Badge>
         </span>
@@ -44,18 +44,18 @@ export function RetrievalEvidence({
               <CardContent className="space-y-3 p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="truncate text-xs font-semibold text-foreground">
+                    <p className="truncate text-sm font-semibold text-foreground">
                       [{index + 1}] {result.filename}
                     </p>
-                    <p className="mt-1 truncate text-[11px] text-muted-foreground">
+                    <p className="mt-1 truncate text-sm text-muted-foreground">
                       {heading || "未命名章节"}
                     </p>
                   </div>
-                  <Badge variant="outline" className="shrink-0 font-mono text-[10px] tabular-nums">
+                  <Badge variant="outline" className="shrink-0 font-mono text-sm tabular-nums">
                     {result.score.toFixed(4)}
                   </Badge>
                 </div>
-                <p className="line-clamp-4 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">
+                <p className="line-clamp-4 whitespace-pre-wrap text-base leading-7 text-muted-foreground">
                   {result.content}
                 </p>
               </CardContent>

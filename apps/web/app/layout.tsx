@@ -1,10 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { DatabaseZap, Sparkles } from "lucide-react";
 import { Geist, Geist_Mono } from "next/font/google";
-
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -34,30 +30,30 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="zh-CN">
       <body className={`${geistSans.variable} ${geistMono.variable} font-sans`}>
         <header className="sticky top-0 z-40 border-b border-border/70 bg-background/88 backdrop-blur-xl">
-          <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-            <div className="flex items-center gap-8">
-              <Link href="/" className="group flex items-center gap-3" aria-label="UltimateRAG 首页">
-                <span className="grid size-9 place-items-center rounded-xl bg-foreground text-background shadow-sm transition-transform group-hover:-rotate-3">
-                  <DatabaseZap className="size-4.5" />
-                </span>
-                <span className="text-[15px] font-semibold tracking-tight">UltimateRAG</span>
+          <div className="mx-auto flex h-16 max-w-7xl items-center gap-10 px-4 sm:px-6 lg:px-8">
+            <Link
+              href="/"
+              className="text-lg font-medium tracking-tight"
+              aria-label="UltimateRAG 首页"
+            >
+              UltimateRAG
+            </Link>
+            {/* 导航链接保持主流产品的纯文字形态：hover 只过渡文字颜色，
+                不使用按钮组件的背景填充，避免链接看起来像可点击的按钮。 */}
+            <nav className="hidden items-center gap-7 md:flex" aria-label="主导航">
+              <Link
+                href="/knowledge-bases"
+                className="text-lg font-medium text-muted-foreground transition-colors hover:text-foreground"
+              >
+                知识库
               </Link>
-              <nav className="hidden items-center gap-1 md:flex" aria-label="主导航">
-                <Button variant="ghost" size="sm" asChild>
-                  <Link href="/">知识库</Link>
-                </Button>
-                <Button variant="ghost" size="sm" asChild>
-                  <Link href="/#architecture">架构</Link>
-                </Button>
-              </nav>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <Badge variant="outline" className="hidden gap-1.5 bg-card/80 sm:inline-flex">
-                <Sparkles className="text-primary" />
-                V1 · Naive RAG
-              </Badge>
-            </div>
+              <Link
+                href="/chat"
+                className="text-lg font-medium text-muted-foreground transition-colors hover:text-foreground"
+              >
+                知识问答
+              </Link>
+            </nav>
           </div>
         </header>
         <main>{children}</main>
