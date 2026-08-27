@@ -1,6 +1,24 @@
-"""FastAPI 应用入口与基础设施装配。
+"""FastAPI 应用入口与进程级依赖装配。
 
-外部客户端在 lifespan 中创建并复用；数据库表结构由 Alembic 管理，不在应用启动时隐式修改。
+模块职责：
+    创建 FastAPI 应用，在 Lifespan 中装配数据库、对象存储、向量库、模型客户端与
+    应用服务，并注册中间件、路由和统一异常映射。
+
+架构边界：
+    本模块位于 Interface 层，只负责进程启动与 HTTP 边界。文档摄取、检索和生成的
+    业务顺序由 Application Service 编排，外部协议细节由 Infrastructure Adapter 负责。
+
+设计背景：
+    V1 使用一个显式 Container 保存进程内共享依赖。相比在每个 Route 中临时创建客户端，
+    这种方式可以复用连接池并让对象生命周期可见；当前依赖数量有限，因此不引入 DI 框架。
+
+典型使用场景：
+    Uvicorn 导入本模块中的 ``app``，随后由 FastAPI 调用 ``lifespan()`` 完成启动和关闭。
+
+注意事项 / 已知限制：
+    数据库 Schema 只能通过 Alembic Migration 管理，启动过程不会自动建表。MinIO Bucket
+    或 Milvus Collection 初始化失败时应用不会进入请求服务阶段。V1 关闭时显式释放数据库
+    Engine；其他 Adapter 当前没有统一的异步关闭端口。
 """
 
 import logging
@@ -11,6 +29,8 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from api.container import Container
+from api.routes import router
 from ultimate_rag.application import (
     ContextBuilder,
     DocumentLifecycleService,
@@ -29,8 +49,6 @@ from ultimate_rag.embeddings import BailianEmbedder
 from ultimate_rag.generation import BailianLLMClient
 from ultimate_rag.infrastructure.database import create_database
 from ultimate_rag.infrastructure.storage import MinioObjectStorage
-from ultimate_rag.interfaces.api.container import Container
-from ultimate_rag.interfaces.api.routes import router
 from ultimate_rag.parsers import MarkdownParser, ParserRegistry
 from ultimate_rag.vectorstores import MilvusVectorStore
 
@@ -43,7 +61,28 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """装配 V1 依赖、幂等初始化 Bucket/Collection，并在退出时释放数据库引擎。"""
+    """在 FastAPI 进程生命周期内创建、校验并暴露 V1 所需依赖。
+
+    Lifespan 的启动部分严格先于 ``yield`` 执行。只有 MinIO Bucket 和 Milvus Collection
+    均准备完成后，FastAPI 才开始接收请求；因此 Route 不需要处理“依赖尚未初始化”的状态。
+
+    Args:
+        app: 当前 FastAPI 应用，用于通过 ``app.state`` 暴露进程级依赖容器。
+
+    Yields:
+        无业务值；执行到 ``yield`` 表示启动检查完成，可以开始处理 HTTP 请求。
+
+    Raises:
+        Exception: 数据库适配器、MinIO 或 Milvus 初始化失败时保留原始异常并中止启动。
+
+    Side Effects:
+        创建外部服务客户端，幂等创建 Bucket/Collection，写入 ``app.state.container``，
+        并在正常关闭阶段释放 SQLAlchemy Engine 的连接池。
+    """
+
+    # 阶段 1：创建事实数据库和原文件存储适配器。
+    # create_database 只构造 Engine、Session Factory 和 Repository，不在启动时隐式建表；
+    # PostgreSQL Schema 必须事先通过 Alembic 升级，避免应用启动悄悄修改生产数据库。
     engine, repository = create_database(settings.database_url)
     storage = MinioObjectStorage(
         settings.minio_endpoint,
@@ -52,6 +91,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.minio_bucket,
         settings.minio_secure,
     )
+
+    # 阶段 2：创建会被所有请求复用的模型与向量存储客户端。
+    # Embedder 与 Milvus 必须使用同一向量维度，否则 Embedding 即使生成成功也无法写入
+    # Collection；两者都读取同一个 Settings 字段，避免分别配置后产生隐蔽的不一致。
     embedder = BailianEmbedder(
         api_key=settings.dashscope_api_key,
         base_url=settings.dashscope_base_url,
@@ -66,15 +109,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         collection=settings.milvus_collection,
         dimension=settings.embedding_dimension,
     )
+
+    # LLM 与 Embedder 共享百炼的 OpenAI-Compatible Endpoint 和 API Key，但模型职责不同：
+    # Embedder 只生成检索向量，LLMClient 只根据构造后的知识上下文生成最终答案。
     llm = BailianLLMClient(
         api_key=settings.dashscope_api_key,
         base_url=settings.dashscope_base_url,
         model=settings.llm_model,
         timeout=settings.model_timeout_seconds,
     )
+
+    # 阶段 3：装配不直接拥有外部资源的领域策略和应用服务。
+    # Registry 隔离源格式与 Parser 选择，Chunker 负责统一 ParsedDocument 之后的切块；
+    # RetrievalService 复用同一个 Embedder，保证查询向量与文档向量处于相同向量空间。
     registry = ParserRegistry([MarkdownParser()])
     chunker = StructureAwareMarkdownChunker(settings.chunk_max_chars, settings.chunk_overlap_chars)
     retrieval = RetrievalService(embedder, vector_store)
+
+    # 阶段 4：把已经装配好的对象集中放入进程级 Container。
+    # Route 只从 app.state 取应用服务，不自行读取配置或创建客户端，从而保持 HTTP 层轻量，
+    # 也确保摄取、检索和删除流程使用的是同一组 Repository、Storage 与 VectorStore 实例。
     app.state.container = Container(
         engine=engine,
         repository=repository,
@@ -91,9 +145,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         rag=RAGService(retrieval, ContextBuilder(settings.context_max_chars), llm),
         lifecycle=DocumentLifecycleService(repository, storage, vector_store),
     )
+
+    # 阶段 5：在开放 HTTP 服务之前完成外部资源的幂等准备。
+    # Bucket/Collection 不存在时创建，存在时复用；任一步抛出异常都会阻止执行 yield，
+    # FastAPI 因而不会在依赖不可用或向量 Schema 未准备好时对外宣称启动成功。
     await storage.ensure_bucket()
     await vector_store.ensure_collection()
+
+    # 生命周期分界点：yield 之前属于启动阶段，yield 期间由 FastAPI 处理请求，
+    # 恢复执行后进入关闭阶段。所有 Route 此时都可以读取上方写入的 Container。
     yield
+
+    # 阶段 6：正常关闭时释放 SQLAlchemy Engine 管理的连接池。
+    # 当前其他 Adapter 没有统一的 close() 端口，因此这里只清理明确由本模块持有的异步资源。
     await engine.dispose()
 
 

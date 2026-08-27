@@ -6,10 +6,12 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PATH="/app/.venv/bin:$PATH"
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+COPY apps/api ./apps/api
 COPY alembic ./alembic
 COPY alembic.ini ./
 # BuildKit 缓存 uv 下载目录；源码变化仍会重装本项目，但不会反复下载大型二进制依赖。
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 
 EXPOSE 8000
-CMD ["sh", "-c", "alembic upgrade head && uvicorn ultimate_rag.interfaces.api.app:app --host 0.0.0.0 --port 8000"]
+# 核心库 ultimate_rag 来自 venv，API 应用包通过 --app-dir 加入导入路径。
+CMD ["sh", "-c", "alembic upgrade head && uvicorn --app-dir apps api.app:app --host 0.0.0.0 --port 8000"]

@@ -55,6 +55,9 @@ class Repository:
             model = await session.get(KnowledgeBaseModel, knowledge_base_id)
             if model is None:
                 raise ResourceNotFoundError("知识库不存在")
+
+            # 删除前获取领域快照。数据库提交后 ORM 实例可能失效，而应用服务仍需要文档的
+            # Object Key 清理 MinIO；返回领域对象可以避免把 SQLAlchemy 生命周期泄漏到上层。
             document_models = list(
                 await session.scalars(
                     select(DocumentModel).where(
@@ -63,6 +66,8 @@ class Repository:
                 )
             )
             documents = [self._document(document) for document in document_models]
+
+            # ORM 关系配置负责级联删除 Document 和 Chunk，三类事实记录在同一事务中提交。
             await session.delete(model)
             return documents
 
@@ -78,6 +83,8 @@ class Repository:
         sha256: str,
     ) -> Document:
         """在确认所属知识库存在后创建 ``PENDING`` 文档记录。"""
+        # PENDING 是事实记录的初始状态。应用服务只有在后续 Parse、Chunk、Embed、Index
+        # 全部完成后才会推进到 READY，因此刚上传的文档不会提前参与检索。
         model = DocumentModel(
             id=document_id,
             knowledge_base_id=knowledge_base_id,
@@ -89,6 +96,8 @@ class Repository:
             status=DocumentStatus.PENDING.value,
         )
         async with self._session_factory() as session, session.begin():
+            # 即使应用服务已经检查过知识库，这里仍在创建事务内验证一次。
+            # 它既让 Repository 的公共方法可以独立安全调用，也能处理检查后知识库被删除的竞态。
             if await session.get(KnowledgeBaseModel, knowledge_base_id) is None:
                 raise ResourceNotFoundError("知识库不存在")
             session.add(model)
@@ -96,6 +105,8 @@ class Repository:
 
     async def list_documents(self, knowledge_base_id: str) -> list[Document]:
         """返回知识库文档；知识库不存在与空知识库使用不同语义。"""
+        # 先显式读取知识库，确保“不存在”抛出 404，而真实存在但没有文档时返回空列表。
+        # 如果只执行下面的 Document 查询，这两种业务情况都会得到相同的空结果。
         await self.get_knowledge_base(knowledge_base_id)
         async with self._session_factory() as session:
             result = await session.scalars(
@@ -127,8 +138,14 @@ class Repository:
             model = await session.get(DocumentModel, document_id)
             if model is None:
                 raise ResourceNotFoundError("文档不存在")
+
+            # 状态与错误信息在同一事务内更新。成功推进到新阶段时 error_message 默认清空，
+            # 避免一次失败重试成功后仍向用户展示已经过期的错误原因。
             model.status = status.value
             model.error_message = error_message
+
+            # Parser 信息只在解析器已确定时传入；后续状态更新不能用 None 覆盖已记录的版本，
+            # 否则失败排查和重新构建索引时会失去原处理器信息。
             if parser_name is not None:
                 model.parser_name = parser_name
             if parser_version is not None:
@@ -137,6 +154,8 @@ class Repository:
     async def replace_chunks(self, document_id: str, chunks: Sequence[Chunk]) -> None:
         """在事务中替换文档 Chunk，保证重试不会产生重复事实记录。"""
         async with self._session_factory() as session, session.begin():
+            # “先删后插”位于同一数据库事务：任意新 Chunk 写入失败都会整体回滚，
+            # 不会让文档在 PostgreSQL 中只剩半套新 Chunk。稳定 ID 还保证成功重试结果一致。
             await session.execute(delete(ChunkModel).where(ChunkModel.document_id == document_id))
             session.add_all(
                 [

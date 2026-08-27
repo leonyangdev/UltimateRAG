@@ -49,5 +49,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
-packages = ["ultimate_rag"]
+# ultimate_rag 核心库位于 src 布局，API 应用包位于 apps/api；mypy 的 packages 配置项
+# 不支持配合 mypy_path 定位未安装包，因此这里直接按路径检查两个包。
+files = ["src/ultimate_rag", "apps/api"]
 

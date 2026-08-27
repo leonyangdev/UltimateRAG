@@ -130,7 +130,7 @@ docker compose down -v
 docker compose up -d postgres minio etcd milvus attu
 uv sync
 uv run alembic upgrade head
-uv run uvicorn ultimate_rag.interfaces.api.app:app --reload
+uv run uvicorn --app-dir apps api.app:app --reload
 ```
 
 默认本地配置在 `.env.example` 中。Alembic 是唯一数据库 Schema 变更入口，应用启动不会自动建表。
@@ -215,6 +215,7 @@ npm audit
 
 ```text
 apps/web/                         Next.js Web
+apps/api/                         FastAPI 应用
 src/ultimate_rag/domain/          领域模型与端口
 src/ultimate_rag/application/     显式业务工作流
 src/ultimate_rag/parsers/         Markdown 解析与注册表
@@ -223,7 +224,6 @@ src/ultimate_rag/embeddings/      百炼向量适配器
 src/ultimate_rag/vectorstores/    Milvus 适配器
 src/ultimate_rag/generation/      百炼 LLM 适配器
 src/ultimate_rag/infrastructure/  PostgreSQL / MinIO
-src/ultimate_rag/interfaces/api/  FastAPI 接口
 alembic/                          数据库迁移
 tests/                            单元测试与固定文档
 docs/                             产品、架构与实现文档

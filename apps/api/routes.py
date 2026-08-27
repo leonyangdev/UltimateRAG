@@ -7,8 +7,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Request, Response, UploadFile, status
 
-from ultimate_rag.interfaces.api.container import Container
-from ultimate_rag.interfaces.api.schemas import (
+from api.container import Container
+from api.schemas import (
     ChatRequest,
     ChatResponse,
     CitationResponse,
