@@ -1,0 +1,130 @@
+name: ultimate-rag-v1
+
+services:
+  # PostgreSQL + MinIO 是事实数据源；Milvus 只保存可重建的派生向量索引。
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ultimate_rag
+      POSTGRES_USER: ultimate_rag
+      POSTGRES_PASSWORD: ultimate_rag
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ultimate_rag -d ultimate_rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ultimate_rag
+      MINIO_ROOT_PASSWORD: ultimate_rag_dev_secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - etcd_data:/etcd
+    restart: unless-stopped
+
+  milvus:
+    image: milvusdb/milvus:v2.5.14
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ultimate_rag
+      MINIO_SECRET_ACCESS_KEY: ultimate_rag_dev_secret
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    depends_on:
+      - etcd
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  attu:
+    image: zilliz/attu:v2.5.12
+    environment:
+      MILVUS_URL: milvus:19530
+    ports:
+      - "8001:3000"
+    depends_on:
+      milvus:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    # 模型凭据直接从项目 .env 注入，避免开发机同名环境变量在 Compose 插值阶段覆盖它。
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ultimate_rag:ultimate_rag@postgres:5432/ultimate_rag
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ultimate_rag
+      MINIO_SECRET_KEY: ultimate_rag_dev_secret
+      MINIO_SECURE: "false"
+      MINIO_BUCKET: documents
+      MILVUS_URI: http://milvus:19530
+      MILVUS_COLLECTION: knowledge_chunks
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+      LLM_MODEL: ${LLM_MODEL:-qwen-plus}
+      CORS_ORIGINS: http://localhost:3000,http://192.168.3.19:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    restart: on-failure
+
+  web:
+    build:
+      context: apps/web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  minio_data:
+  etcd_data:
+  milvus_data:

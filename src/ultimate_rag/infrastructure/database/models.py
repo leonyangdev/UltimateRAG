@@ -1,0 +1,86 @@
+"""SQLAlchemy 持久化模型。
+
+这些模型描述 PostgreSQL 事实数据结构，只在基础设施层使用；应用层通过 Repository 映射为领域对象。
+"""
+
+from datetime import UTC, datetime
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from ultimate_rag.domain.models import DocumentStatus
+
+
+def utc_now() -> datetime:
+    """生成带 UTC 时区的数据库默认时间。"""
+    return datetime.now(UTC)
+
+
+class Base(DeclarativeBase):
+    """UltimateRAG 数据库模型声明基类。"""
+
+    pass
+
+
+class KnowledgeBaseModel(Base):
+    """知识库事实记录及其文档级联关系。"""
+
+    __tablename__ = "knowledge_bases"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    documents: Mapped[list["DocumentModel"]] = relationship(
+        back_populates="knowledge_base", cascade="all, delete-orphan"
+    )
+
+
+class DocumentModel(Base):
+    """原始文档元数据和同步摄取状态记录。"""
+
+    __tablename__ = "documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    knowledge_base_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    filename: Mapped[str] = mapped_column(String(255))
+    mime_type: Mapped[str] = mapped_column(String(120))
+    extension: Mapped[str] = mapped_column(String(20))
+    object_key: Mapped[str] = mapped_column(String(500), unique=True)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(20), default=DocumentStatus.PENDING.value)
+    parser_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    parser_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    knowledge_base: Mapped[KnowledgeBaseModel] = relationship(back_populates="documents")
+    chunks: Mapped[list["ChunkModel"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
+
+
+class ChunkModel(Base):
+    """可用于重建 Milvus 派生索引的 Chunk 事实记录。"""
+
+    __tablename__ = "chunks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    heading_path: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    token_count: Mapped[int] = mapped_column(Integer)
+    chunk_metadata: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    document: Mapped[DocumentModel] = relationship(back_populates="chunks")

@@ -1,0 +1,17 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+apps/web/.next/
+apps/web/node_modules/
+apps/docs/node_modules/
+apps/web/out/
+.idea/
+.vscode/
+
