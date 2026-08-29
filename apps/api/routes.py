@@ -126,17 +126,17 @@ async def delete_knowledge_base(knowledge_base_id: str, request: Request) -> Res
 @router.post(
     "/knowledge-bases/{knowledge_base_id}/documents",
     response_model=DocumentResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def upload_document(
     knowledge_base_id: str,
     request: Request,
     file: Annotated[UploadFile, File()],
 ) -> DocumentResponse:
-    """上传并同步完成多格式文档的解析、切块、向量化和索引。"""
+    """可靠保存文件并提交后台任务；不等待解析、模型调用或索引完成。"""
     dependencies = container(request)
     content = await _read_bounded_upload(file, dependencies.max_upload_bytes)
-    value = await dependencies.ingestion.ingest(
+    value = await dependencies.ingestion.submit(
         knowledge_base_id,
         file.filename or "document.bin",
         file.content_type or "application/octet-stream",

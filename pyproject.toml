@@ -8,6 +8,7 @@ dependencies = [
     "alembic>=1.16,<2",
     "asyncpg>=0.30,<1",
     "beautifulsoup4>=4.13,<5",
+    "docling>=2.60,<3",
     "fastapi>=0.116,<1",
     # OpenAI SDK 通过 HTTPX 自动读取 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY。
     # 本地开发常使用 SOCKS 代理访问百炼，因此运行时必须包含 socksio 可选传输依赖。
@@ -24,8 +25,22 @@ dependencies = [
     "python-multipart>=0.0.20,<1",
     "python-pptx>=1.0,<2",
     "sqlalchemy[asyncio]>=2.0.41,<3",
+    "tiktoken>=0.9,<1",
+    # Docling 默认部署在 CPU Worker；显式依赖配合下方官方 CPU Index，避免 Linux 镜像
+    # 无意拉取数 GB 的 CUDA 运行库。GPU 部署应使用单独锁文件/镜像策略。
+    "torch>=2.12,<2.13",
+    "torchvision>=0.27,<0.28",
     "uvicorn[standard]>=0.35,<1",
 ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [dependency-groups]
 dev = [

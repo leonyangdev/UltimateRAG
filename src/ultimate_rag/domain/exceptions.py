@@ -32,6 +32,12 @@ class DocumentProcessingError(UltimateRAGError):
     pass
 
 
+class DocumentBusyError(UltimateRAGError):
+    """文档仍由后台 Worker 处理，当前操作会破坏状态一致性。"""
+
+    pass
+
+
 class ExternalServiceError(UltimateRAGError):
     """外部基础设施或模型服务发生可识别故障。"""
 

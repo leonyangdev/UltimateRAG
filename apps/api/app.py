@@ -34,33 +34,18 @@ from api.routes import router
 from ultimate_rag.application import (
     ContextBuilder,
     DocumentLifecycleService,
-    IngestionService,
     RAGService,
     RetrievalService,
 )
-from ultimate_rag.chunkers import StructureAwareChunker
 from ultimate_rag.config import get_settings
 from ultimate_rag.domain.exceptions import (
+    DocumentBusyError,
     InvalidDocumentError,
     ResourceNotFoundError,
     UltimateRAGError,
 )
-from ultimate_rag.embeddings import BailianEmbedder
 from ultimate_rag.generation import BailianLLMClient
-from ultimate_rag.infrastructure.database import create_database
-from ultimate_rag.infrastructure.storage import MinioObjectStorage
-from ultimate_rag.ocr import BailianOCRClient
-from ultimate_rag.parsers import (
-    ExcelParser,
-    HtmlParser,
-    ImageOCRParser,
-    MarkdownParser,
-    ParserRegistry,
-    PDFParser,
-    PowerPointParser,
-    WordParser,
-)
-from ultimate_rag.vectorstores import MilvusVectorStore
+from ultimate_rag.runtime import create_processing_runtime
 
 settings = get_settings()
 logging.basicConfig(
@@ -90,106 +75,47 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         并在正常关闭阶段释放 SQLAlchemy Engine 的连接池。
     """
 
-    # 阶段 1：创建事实数据库和原文件存储适配器。
-    # create_database 只构造 Engine、Session Factory 和 Repository，不在启动时隐式建表；
-    # PostgreSQL Schema 必须事先通过 Alembic 升级，避免应用启动悄悄修改生产数据库。
-    engine, repository = create_database(settings.database_url)
-    storage = MinioObjectStorage(
-        settings.minio_endpoint,
-        settings.minio_access_key,
-        settings.minio_secret_key,
-        settings.minio_bucket,
-        settings.minio_secure,
-    )
+    # API 与 Worker 从同一 Composition Root 装配 Parser、Chunker 和事实存储，防止上传校验
+    # 支持某格式、后台进程却没有对应 Parser。API 只使用其中轻量的提交服务，不执行解析。
+    runtime = create_processing_runtime(settings)
 
-    # 阶段 2：创建会被所有请求复用的模型与向量存储客户端。
-    # Embedder 与 Milvus 必须使用同一向量维度，否则 Embedding 即使生成成功也无法写入
-    # Collection；两者都读取同一个 Settings 字段，避免分别配置后产生隐蔽的不一致。
-    embedder = BailianEmbedder(
-        api_key=settings.dashscope_api_key,
-        base_url=settings.dashscope_base_url,
-        model=settings.embedding_model,
-        dimension=settings.embedding_dimension,
-        batch_size=settings.embedding_batch_size,
-        timeout=settings.model_timeout_seconds,
-    )
-    vector_store = MilvusVectorStore(
-        uri=settings.milvus_uri,
-        token=settings.milvus_token,
-        collection=settings.milvus_collection,
-        dimension=settings.embedding_dimension,
-    )
-
-    # LLM、Embedder 与 OCR 共享百炼 Endpoint 和 API Key，但模型职责完全分离。
+    # LLM 只属于 HTTP 问答进程；后台 Worker 不需要创建生成模型客户端。
     llm = BailianLLMClient(
         api_key=settings.dashscope_api_key,
         base_url=settings.dashscope_base_url,
         model=settings.llm_model,
         timeout=settings.model_timeout_seconds,
     )
-    ocr = BailianOCRClient(
-        api_key=settings.dashscope_api_key,
-        base_url=settings.dashscope_base_url,
-        model=settings.ocr_model,
-        max_image_bytes=settings.ocr_max_image_bytes,
-        timeout=settings.model_timeout_seconds,
-    )
-
-    # 阶段 3：装配不直接拥有外部资源的领域策略和应用服务。
-    # Registry 隔离源格式与 Parser 选择，Chunker 负责统一 ParsedDocument 之后的切块；
-    # RetrievalService 复用同一个 Embedder，保证查询向量与文档向量处于相同向量空间。
-    registry = ParserRegistry(
-        [
-            MarkdownParser(),
-            WordParser(),
-            ExcelParser(),
-            PowerPointParser(),
-            HtmlParser(),
-            PDFParser(
-                ocr,
-                native_text_threshold=settings.pdf_native_text_threshold,
-                render_scale=settings.pdf_render_scale,
-            ),
-            ImageOCRParser(ocr),
-        ]
-    )
-    chunker = StructureAwareChunker(settings.chunk_max_chars, settings.chunk_overlap_chars)
-    retrieval = RetrievalService(embedder, vector_store)
+    retrieval = RetrievalService(runtime.embedder, runtime.vector_store, runtime.repository)
 
     # 阶段 4：把已经装配好的对象集中放入进程级 Container。
     # Route 只从 app.state 取应用服务，不自行读取配置或创建客户端，从而保持 HTTP 层轻量，
     # 也确保摄取、检索和删除流程使用的是同一组 Repository、Storage 与 VectorStore 实例。
     app.state.container = Container(
-        engine=engine,
+        engine=runtime.engine,
         max_upload_bytes=settings.max_upload_bytes,
-        repository=repository,
-        ingestion=IngestionService(
-            repository=repository,
-            storage=storage,
-            parser_registry=registry,
-            chunker=chunker,
-            embedder=embedder,
-            vector_store=vector_store,
-            max_upload_bytes=settings.max_upload_bytes,
-        ),
+        repository=runtime.repository,
+        ingestion=runtime.ingestion,
         retrieval=retrieval,
         rag=RAGService(retrieval, ContextBuilder(settings.context_max_chars), llm),
-        lifecycle=DocumentLifecycleService(repository, storage, vector_store),
+        lifecycle=DocumentLifecycleService(
+            runtime.repository,
+            runtime.storage,
+            runtime.vector_store,
+        ),
     )
 
     # 阶段 5：在开放 HTTP 服务之前完成外部资源的幂等准备。
     # Bucket/Collection 不存在时创建，存在时复用；任一步抛出异常都会阻止执行 yield，
     # FastAPI 因而不会在依赖不可用或向量 Schema 未准备好时对外宣称启动成功。
-    await storage.ensure_bucket()
-    await vector_store.ensure_collection()
+    try:
+        await runtime.initialize()
 
-    # 生命周期分界点：yield 之前属于启动阶段，yield 期间由 FastAPI 处理请求，
-    # 恢复执行后进入关闭阶段。所有 Route 此时都可以读取上方写入的 Container。
-    yield
-
-    # 阶段 6：正常关闭时释放 SQLAlchemy Engine 管理的连接池。
-    # 当前其他 Adapter 没有统一的 close() 端口，因此这里只清理明确由本模块持有的异步资源。
-    await engine.dispose()
+        # 生命周期分界点：yield 之前属于启动阶段，yield 期间由 FastAPI 处理请求。
+        yield
+    finally:
+        # 初始化中途失败也必须释放已经创建的数据库连接池。
+        await runtime.close()
 
 
 app = FastAPI(title=settings.app_name, version="2.0.0", lifespan=lifespan)
@@ -216,6 +142,13 @@ async def not_found_handler(_request: Request, exc: ResourceNotFoundError) -> JS
 async def invalid_document_handler(_request: Request, exc: InvalidDocumentError) -> JSONResponse:
     """把文档输入错误转换为用户可修复的 400 响应。"""
     return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"detail": str(exc)})
+
+
+@app.exception_handler(DocumentBusyError)
+async def document_busy_handler(_request: Request, exc: DocumentBusyError) -> JSONResponse:
+    """处理中的文档存在并发写入风险，使用 409 提示客户端稍后重试。"""
+
+    return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
 
 
 @app.exception_handler(UltimateRAGError)

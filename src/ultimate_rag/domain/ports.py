@@ -121,3 +121,11 @@ class OCRClient(Protocol):
     async def extract_text(self, image: bytes, mime_type: str) -> str:
         """识别单张可信格式图片，返回保持阅读顺序的非空文本。"""
         ...
+
+
+class VisionClient(Protocol):
+    """把图表、示意图等视觉内容转换为可检索文字的模型边界。"""
+
+    async def describe(self, image: bytes, mime_type: str, caption: str = "") -> str:
+        """提取可见文字、结构和图形语义，不推断图片中不存在的事实。"""
+        ...

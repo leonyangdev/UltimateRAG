@@ -5,11 +5,11 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from ultimate_rag.domain.models import DocumentStatus
+from ultimate_rag.domain.models import DocumentStatus, IngestionJobStatus
 
 
 def utc_now() -> datetime:
@@ -41,7 +41,7 @@ class KnowledgeBaseModel(Base):
 
 
 class DocumentModel(Base):
-    """原始文档元数据和同步摄取状态记录。"""
+    """原始文档元数据和后台摄取状态记录。"""
 
     __tablename__ = "documents"
 
@@ -66,6 +66,33 @@ class DocumentModel(Base):
     chunks: Mapped[list["ChunkModel"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
+    ingestion_job: Mapped["IngestionJobModel | None"] = relationship(
+        back_populates="document", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class IngestionJobModel(Base):
+    """PostgreSQL 持久化任务；进程重启后仍可继续领取和有限重试。"""
+
+    __tablename__ = "ingestion_jobs"
+    __table_args__ = (Index("ix_ingestion_jobs_claim", "status", "available_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), unique=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default=IngestionJobStatus.PENDING.value)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    worker_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    document: Mapped[DocumentModel] = relationship(back_populates="ingestion_job")
 
 
 class ChunkModel(Base):

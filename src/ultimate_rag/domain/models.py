@@ -14,7 +14,7 @@ type JsonValue = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
 
 
 class DocumentStatus(StrEnum):
-    """同步摄取管线的可观察状态；只有完整索引成功后才能进入 ``READY``。"""
+    """后台摄取管线的用户可观察状态；完整索引成功前绝不能进入 ``READY``。"""
 
     PENDING = "PENDING"
     PARSING = "PARSING"
@@ -22,6 +22,19 @@ class DocumentStatus(StrEnum):
     EMBEDDING = "EMBEDDING"
     INDEXING = "INDEXING"
     READY = "READY"
+    FAILED = "FAILED"
+
+
+class IngestionJobStatus(StrEnum):
+    """持久化摄取任务的内部调度状态。
+
+    文档状态面向用户表达当前处理阶段；任务状态只负责 Worker 领取、重试与完成语义，
+    二者刻意分开，避免把队列实现细节暴露到公开 API。
+    """
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
 
 
@@ -220,6 +233,23 @@ class Document:
     status: DocumentStatus
     parser_name: str | None
     parser_version: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionJob:
+    """Worker 已领取或可领取的持久化文档摄取任务快照。"""
+
+    id: str
+    document_id: str
+    status: IngestionJobStatus
+    attempts: int
+    max_attempts: int
+    available_at: datetime
+    locked_at: datetime | None
+    worker_id: str | None
     error_message: str | None
     created_at: datetime
     updated_at: datetime

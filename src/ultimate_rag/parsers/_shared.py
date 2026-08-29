@@ -7,7 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 from zipfile import BadZipFile, ZipFile
 
 from ultimate_rag.domain.exceptions import InvalidDocumentError
-from ultimate_rag.domain.models import Block, BlockType, DocumentSource, SourceLocator
+from ultimate_rag.domain.models import Block, BlockType, DocumentSource, JsonValue, SourceLocator
 
 
 def source_extension(source: DocumentSource) -> str:
@@ -40,13 +40,20 @@ def stable_block(
     block_type: BlockType,
     content: str,
     locator: SourceLocator,
+    metadata: dict[str, JsonValue] | None = None,
 ) -> Block:
-    """使用文档、顺序、类型和内容生成可重复的 Block ID。"""
+    """使用文档、顺序、类型和内容生成可重复 Block，并复制可选解析元数据。"""
 
     block_id = str(
         uuid5(NAMESPACE_URL, f"{document_id}:block:{index}:{block_type.value}:{content}")
     )
-    return Block(id=block_id, type=block_type, content=content, locator=locator)
+    return Block(
+        id=block_id,
+        type=block_type,
+        content=content,
+        locator=locator,
+        metadata=dict(metadata or {}),
+    )
 
 
 def table_to_markdown(rows: Sequence[Sequence[object]]) -> str:

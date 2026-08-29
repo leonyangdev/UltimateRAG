@@ -7,7 +7,7 @@ import pytest
 
 from ultimate_rag.application import IngestionService
 from ultimate_rag.domain.exceptions import InvalidDocumentError
-from ultimate_rag.domain.ports import Chunker, Embedder, ObjectStorage, VectorStore
+from ultimate_rag.domain.ports import ObjectStorage
 from ultimate_rag.infrastructure.database.repository import Repository
 from ultimate_rag.parsers import MarkdownParser, ParserRegistry
 
@@ -23,10 +23,8 @@ async def test_ingestion_rejects_extension_mime_mismatch_before_storage() -> Non
         repository=cast(Repository, repository),
         storage=cast(ObjectStorage, storage),
         parser_registry=ParserRegistry([MarkdownParser()]),
-        chunker=cast(Chunker, AsyncMock()),
-        embedder=cast(Embedder, AsyncMock()),
-        vector_store=cast(VectorStore, AsyncMock()),
         max_upload_bytes=1024,
+        job_max_attempts=3,
     )
 
     with pytest.raises(InvalidDocumentError, match="不支持的文档类型"):

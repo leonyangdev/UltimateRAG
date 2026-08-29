@@ -3,6 +3,7 @@
 from ultimate_rag.application.context import ContextBuilder
 from ultimate_rag.application.services import (
     DocumentLifecycleService,
+    DocumentProcessingService,
     IngestionService,
     RAGService,
     RetrievalService,
@@ -11,6 +12,7 @@ from ultimate_rag.application.services import (
 __all__ = [
     "ContextBuilder",
     "DocumentLifecycleService",
+    "DocumentProcessingService",
     "IngestionService",
     "RAGService",
     "RetrievalService",

@@ -1,31 +1,29 @@
-"""V2 文档生命周期、检索与生成应用服务。
+"""V2 文档生命周期、后台处理、检索与生成应用服务。
 
 模块职责：
-    以普通 Python Service 显式编排两条 RAG 主链路：
-    ``Upload → Parse → Chunk → Embed → Index`` 与 ``Query → Retrieve → Generate``。
+    以普通 Python Service 显式编排上传入队、后台文档处理与 RAG 查询链路。
 
 架构边界：
     本模块只依赖领域模型、领域端口和 Repository，不实现具体文件语法、Embedding 协议、
     Milvus SDK 或 HTTP 路由。基础设施异常在这里转换为用户可理解的业务失败状态。
 
 设计背景：
-    V1 的处理流程是确定性的顺序工作流，不需要 LangGraph、事件总线或任务编排框架。
-    显式方法调用让学习者能够从上到下看到状态如何变化，也让每个阶段可以单独测试和替换。
+    处理流程本身仍是确定性的顺序工作流，不需要 LangGraph。耗时工作由持久化 Worker 执行，
+    使 HTTP 上传在原文件和任务可靠落库后立即返回。
 
 数据一致性：
-    PostgreSQL 与 MinIO 保存事实数据，Milvus 保存可重建的派生索引。V1 不实现跨存储事务，
+    PostgreSQL 与 MinIO 保存事实数据，Milvus 保存可重建的派生索引。V2 不实现跨存储事务，
     而是使用稳定 ID、明确的 FAILED 状态和有限补偿降低部分失败造成的不一致。
 """
 
 import hashlib
-import logging
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import PurePath
 from uuid import uuid4
 
 from ultimate_rag.application.context import ContextBuilder
-from ultimate_rag.domain.exceptions import DocumentProcessingError, InvalidDocumentError
+from ultimate_rag.domain.exceptions import DocumentBusyError, InvalidDocumentError
 from ultimate_rag.domain.models import (
     Citation,
     Document,
@@ -38,17 +36,12 @@ from ultimate_rag.domain.ports import Chunker, Embedder, LLMClient, ObjectStorag
 from ultimate_rag.infrastructure.database.repository import Repository
 from ultimate_rag.parsers.registry import ParserRegistry
 
-logger = logging.getLogger(__name__)
-
 
 class IngestionService:
-    """编排多格式文档从上传字节到可检索向量的同步摄取流程。
+    """校验上传、保存原文件并原子创建文档与后台任务。
 
-    本类位于 Application 层，负责输入边界、阶段顺序、文档状态和失败语义；Parser、Chunker、
-    Embedder 与 VectorStore 的具体算法或外部协议由注入的端口实现，不在本类中处理。
-
-    V1 不模拟分布式事务。原文件先落 MinIO，后续失败保留原文件与文档事实并标记 ``FAILED``；
-    只有 PostgreSQL Chunk 与 Milvus 向量均成功写入后，文档才进入 ``READY``。
+    这里刻意不解析、切块或调用模型。HTTP 请求只等待输入校验、MinIO 写入和 PostgreSQL
+    事务，因此复杂 PDF 不会长期占用上传连接；后续阶段由 ``DocumentProcessingService`` 执行。
     """
 
     def __init__(
@@ -57,28 +50,24 @@ class IngestionService:
         repository: Repository,
         storage: ObjectStorage,
         parser_registry: ParserRegistry,
-        chunker: Chunker,
-        embedder: Embedder,
-        vector_store: VectorStore,
         max_upload_bytes: int,
+        job_max_attempts: int,
     ) -> None:
-        """注入事实存储、处理策略和最大上传限制，不在构造时访问外部服务。"""
+        """注入事实存储、格式注册表和上传/重试边界。"""
         self._repository = repository
         self._storage = storage
         self._parser_registry = parser_registry
-        self._chunker = chunker
-        self._embedder = embedder
-        self._vector_store = vector_store
         self._max_upload_bytes = max_upload_bytes
+        self._job_max_attempts = job_max_attempts
 
-    async def ingest(
+    async def submit(
         self,
         knowledge_base_id: str,
         filename: str,
         mime_type: str,
         content: bytes,
     ) -> Document:
-        """校验、保存并同步处理一份 V2 支持的文档。
+        """校验并可靠提交一份后台处理文档。
 
         Args:
             knowledge_base_id: 文档所属知识库 ID。
@@ -87,16 +76,14 @@ class IngestionService:
             content: 原始文件字节；Parser 会继续验证实际格式和内容。
 
         Returns:
-            已完成处理且状态为 ``READY`` 的文档。
+            已持久化且状态为 ``PENDING`` 的文档；返回不代表解析已经完成。
 
         Raises:
             ResourceNotFoundError: 所属知识库不存在。
             InvalidDocumentError: 文件类型、大小、编码或内容不合法。
-            DocumentProcessingError: 解析、向量化或索引失败；文档会保留为 ``FAILED``。
-
         Side Effects:
-            写入 MinIO、PostgreSQL 和 Milvus；元数据创建失败时补偿删除刚上传的 MinIO 对象，
-            处理阶段失败时保留原文件并把文档状态更新为 ``FAILED``。
+            写入 MinIO，并在一个 PostgreSQL 事务中创建 Document 与 IngestionJob。事务失败时
+            补偿删除刚上传的对象，避免形成没有业务事实可追踪的 MinIO 孤儿。
         """
 
         # 阶段 1：在触碰外部存储前验证所属知识库和上传边界。
@@ -132,11 +119,11 @@ class IngestionService:
             DocumentSource(document_id, safe_filename, normalized_mime_type, content)
         )
 
-        # 原文件先于解析和索引持久化。进入处理阶段后即使失败，也不要求用户重新上传，
+        # 原文件先于后台任务持久化。进入处理阶段后即使失败，也不要求用户重新上传，
         # 并且可以使用 MinIO 中的事实数据重新构建 PostgreSQL Chunk 与 Milvus 派生索引。
         await self._storage.put(object_key, content, normalized_mime_type)
         try:
-            document = await self._repository.create_document(
+            document = await self._repository.create_document_with_job(
                 document_id=document_id,
                 knowledge_base_id=knowledge_base_id,
                 filename=safe_filename,
@@ -144,6 +131,7 @@ class IngestionService:
                 extension=extension,
                 object_key=object_key,
                 sha256=sha256,
+                max_attempts=self._job_max_attempts,
             )
         except Exception:
             # 此时 PENDING 文档事实尚未创建，刚上传的对象没有任何业务记录可以追踪，
@@ -151,39 +139,64 @@ class IngestionService:
             await self._storage.delete(object_key)
             raise
 
-        # 阶段 3：执行确定性的处理 Pipeline，并把任意阶段异常投影为 FAILED 业务状态。
-        # 已创建的文档和原文件在失败后继续保留，用户可以看到错误，后续任务也能重试。
-        try:
-            await self._process(document, content)
-        except Exception as exc:
-            logger.exception("Document ingestion failed", extra={"document_id": document_id})
-            await self._repository.update_document_status(
-                document_id,
-                DocumentStatus.FAILED,
-                error_message=self._safe_error(exc),
-            )
-            raise DocumentProcessingError(
-                f"文档处理失败，document_id={document_id}：{self._safe_error(exc)}"
-            ) from exc
+        # Document 与 Job 已原子提交。此处立即返回 PENDING 快照，Worker 即使尚未启动也不会
+        # 丢任务；前端通过列表或详情端点轮询后续阶段，而不是保持上传请求等待。
+        return document
 
-        # 状态更新使用独立短事务，重新读取可以返回数据库最终保存的 READY、解析器信息和时间戳，
-        # 而不是继续返回创建时仍处于 PENDING 的旧领域对象快照。
-        return await self._repository.get_document(document_id)
+    async def ingest(
+        self,
+        knowledge_base_id: str,
+        filename: str,
+        mime_type: str,
+        content: bytes,
+    ) -> Document:
+        """保留旧应用调用名；语义已变为提交后台任务并立即返回。"""
 
-    async def _process(self, document: Document, content: bytes) -> None:
-        """依次执行 Parse、Chunk、Embed 和 Index，并显式记录每个处理状态。
+        return await self.submit(knowledge_base_id, filename, mime_type, content)
+
+
+class DocumentProcessingService:
+    """由 Worker 调用的确定性 ``Parse → Chunk → Embed → Index`` 管线。"""
+
+    def __init__(
+        self,
+        *,
+        repository: Repository,
+        storage: ObjectStorage,
+        parser_registry: ParserRegistry,
+        chunker: Chunker,
+        embedder: Embedder,
+        vector_store: VectorStore,
+    ) -> None:
+        """注入处理阶段需要的事实存储、策略与外部端口。"""
+
+        self._repository = repository
+        self._storage = storage
+        self._parser_registry = parser_registry
+        self._chunker = chunker
+        self._embedder = embedder
+        self._vector_store = vector_store
+
+    async def process(self, document_id: str) -> Document:
+        """幂等处理一份已入队文档，并显式记录每个阶段。
 
         Args:
-            document: 已持久化且处于 ``PENDING`` 的文档事实快照。
-            content: 与文档 Object Key 对应的原始上传字节。
+            document_id: 已持久化文档 ID；原文件由 Object Key 从 MinIO 重新读取。
 
         Raises:
             InvalidDocumentError: Parser 或 Chunker 无法生成可索引内容。
-            Exception: 外部处理阶段失败时保留原始异常，由 ``ingest()`` 统一记录 ``FAILED``。
+            Exception: 外部处理失败时保留原始异常，由 Worker 决定是否有限重试。
 
         Side Effects:
             更新 PostgreSQL 文档状态和 Chunk，删除并重建该文档的 Milvus 向量。
         """
+
+        document = await self._repository.get_document(document_id)
+        if document.status == DocumentStatus.READY:
+            # Worker 可能在 READY 写入后、任务完成提交前退出。重领时直接返回可以关闭这一
+            # 很小的提交窗口，避免再次支付解析和向量化成本。
+            return document
+        content = await self._storage.get(document.object_key)
 
         # 阶段 1 — Parse：先建立不依赖 FastAPI、MinIO SDK 或 ORM 的 DocumentSource。
         # Parser 只接收这个领域输入，并把不同原始格式统一映射为 ParsedDocument/Block。
@@ -245,15 +258,19 @@ class IngestionService:
         await self._vector_store.delete_by_document(document.id)
         await self._vector_store.upsert(embedded_chunks)
 
-        # READY 是 Pipeline 的提交标志，只能放在最后。此前任一步失败都会回到 ingest()，
-        # 由它记录 FAILED，确保用户永远不会检索到只完成部分索引的文档。
+        # READY 是 Pipeline 的提交标志，只能放在最后。此前异常向 Worker 冒泡，由 Worker
+        # 在同一数据库事务内更新任务和文档失败/重试状态。
         await self._repository.update_document_status(document.id, DocumentStatus.READY)
+        return await self._repository.get_document(document.id)
 
-    @staticmethod
-    def _safe_error(exc: Exception) -> str:
-        """截断外部异常文本，避免无界错误内容写入数据库或返回客户端。"""
-        message = str(exc).strip() or exc.__class__.__name__
-        return message[:1000]
+    async def cleanup_partial_index(self, document_id: str) -> None:
+        """失败后尽力清理可能只写入一部分的 Milvus 派生向量。
+
+        PostgreSQL Chunk 与 MinIO 原文件继续保留用于诊断和重试；只有派生索引需要清理，
+        防止尚未 READY 的文档在异常窗口内进入检索结果。
+        """
+
+        await self._vector_store.delete_by_document(document_id)
 
 
 class RetrievalService:
@@ -263,10 +280,16 @@ class RetrievalService:
     它不负责构造 Prompt 或调用 LLM，因此 Retrieval 可以独立测试和调试。
     """
 
-    def __init__(self, embedder: Embedder, vector_store: VectorStore) -> None:
-        """注入共享向量编码器和向量索引。"""
+    def __init__(
+        self,
+        embedder: Embedder,
+        vector_store: VectorStore,
+        repository: Repository,
+    ) -> None:
+        """注入共享向量编码器、向量索引与文档事实读取端。"""
         self._embedder = embedder
         self._vector_store = vector_store
+        self._repository = repository
 
     async def search(
         self,
@@ -288,7 +311,16 @@ class RetrievalService:
         # 查询必须沿用文档入库时的 Embedder；更换模型会改变向量空间，
         # 即使维度相同，使用旧 Collection 检索也不会得到有意义的相似度。
         query_vector = await self._embedder.embed_query(query)
-        return await self._vector_store.search(query_vector, knowledge_base_id, top_k)
+
+        # Milvus 是派生索引，索引写入与 PostgreSQL READY 状态无法形成跨系统原子事务。
+        # 多取少量候选后按事实状态过滤，可避免 Worker 崩溃时的半成品向量参与回答。
+        candidates = await self._vector_store.search(
+            query_vector,
+            knowledge_base_id,
+            min(top_k * 3, 60),
+        )
+        ready_document_ids = await self._repository.list_ready_document_ids(knowledge_base_id)
+        return [result for result in candidates if result.document_id in ready_document_ids][:top_k]
 
 
 class RAGService:
@@ -432,6 +464,10 @@ class DocumentLifecycleService:
 
         # 删除开始前读取文档事实，既验证资源存在，也取得系统生成的 MinIO Object Key。
         document = await self._repository.get_document(document_id)
+        if document.status not in {DocumentStatus.READY, DocumentStatus.FAILED}:
+            # 没有取消协议时直接删除事实记录，会让已领取任务继续向 MinIO/Milvus 写入并形成孤儿。
+            # 当前版本明确拒绝该竞态，用户可在任务进入终态后重试删除。
+            raise DocumentBusyError("文档正在后台处理，完成或失败后才能删除")
 
         # PostgreSQL 放在最后删除：前两步中断时，事实记录仍能告诉补偿操作应该清理什么。
         # 任一步异常都继续上抛，API 不能在外部资源仍残留时返回虚假的 204 成功。
@@ -445,6 +481,11 @@ class DocumentLifecycleService:
         # 删除数据库前先获取文档快照；若先触发级联删除，之后将失去所有 MinIO Object Key，
         # 无法知道知识库曾经包含哪些需要清理的原始文件。
         documents = await self._repository.list_documents(knowledge_base_id)
+        if any(
+            document.status not in {DocumentStatus.READY, DocumentStatus.FAILED}
+            for document in documents
+        ):
+            raise DocumentBusyError("知识库仍有文档正在后台处理，完成或失败后才能删除")
 
         # Milvus 支持按知识库过滤条件批量删除，MinIO V1 则按系统 Object Key 逐个删除。
         # PostgreSQL 事实仍然最后提交删除，使中途失败后可以使用同一调用重新清理。

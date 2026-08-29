@@ -9,7 +9,7 @@ from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches
 
-from ultimate_rag.domain.models import BlockType, DocumentSource
+from ultimate_rag.domain.models import BlockType, DocumentSource, SourceLocator
 from ultimate_rag.parsers import (
     ExcelParser,
     HtmlParser,
@@ -18,6 +18,7 @@ from ultimate_rag.parsers import (
     PowerPointParser,
     WordParser,
 )
+from ultimate_rag.parsers.pdf import _LayoutElement
 
 
 class StubOCRClient:
@@ -35,6 +36,41 @@ class StubOCRClient:
         assert image
         self.mime_types.append(mime_type)
         return self.text
+
+
+class StubVisionClient:
+    """返回固定图像语义，证明 PDF 内嵌图片走视觉理解而非丢弃。"""
+
+    async def describe(self, image: bytes, mime_type: str, caption: str = "") -> str:
+        """验证图片、MIME 与题注均已越过版面适配边界。"""
+
+        assert image
+        assert mime_type == "image/jpeg"
+        assert caption == "系统架构"
+        return "架构图显示 API 指向 Worker。"
+
+
+class StubLayoutAnalyzer:
+    """以确定性元素替代重量 Docling 模型，单测只验证 Parser 编排和映射。"""
+
+    def __init__(self, elements: list[_LayoutElement]) -> None:
+        """保存应按阅读顺序返回的版面元素。"""
+
+        self.elements = elements
+        self.calls: list[frozenset[int]] = []
+
+    def analyze(
+        self,
+        content: bytes,
+        filename: str,
+        skipped_pages: frozenset[int],
+    ) -> list[_LayoutElement]:
+        """记录扫描页集合并返回固定结果，不访问本地模型或网络。"""
+
+        assert content
+        assert filename.endswith(".pdf")
+        self.calls.append(skipped_pages)
+        return self.elements
 
 
 def _source(filename: str, mime_type: str, content: bytes) -> DocumentSource:
@@ -216,8 +252,23 @@ async def test_pdf_parser_uses_native_text_without_ocr() -> None:
     """文字型 PDF 达到阈值时必须直接提取，避免不必要的付费 OCR。"""
 
     ocr = StubOCRClient()
+    layout = StubLayoutAnalyzer(
+        [
+            _LayoutElement(
+                0,
+                1,
+                BlockType.TEXT,
+                "UltimateRAG native PDF text",
+                SourceLocator(page=1, bbox=(10, 20, 300, 60)),
+            )
+        ]
+    )
 
-    parsed = await PDFParser(ocr, native_text_threshold=10).parse(
+    parsed = await PDFParser(
+        ocr,
+        native_text_threshold=10,
+        layout_analyzer=layout,
+    ).parse(
         _source(
             "native.pdf",
             "application/pdf",
@@ -230,3 +281,62 @@ async def test_pdf_parser_uses_native_text_without_ocr() -> None:
     assert parsed.blocks[0].locator is not None and parsed.blocks[0].locator.page == 1
     assert parsed.metadata["ocr_page_count"] == 0
     assert ocr.mime_types == []
+    assert layout.calls == [frozenset()]
+
+
+@pytest.mark.asyncio
+async def test_pdf_parser_preserves_layout_table_picture_and_bbox() -> None:
+    """复杂文字 PDF 的阅读顺序、表格、图片语义与 BBox 应全部进入统一 Block。"""
+
+    image = BytesIO()
+    Image.new("RGB", (120, 80), "white").save(image, format="JPEG")
+    layout = StubLayoutAnalyzer(
+        [
+            _LayoutElement(
+                0,
+                1,
+                BlockType.HEADING,
+                "架构",
+                SourceLocator(heading_path=("架构",), page=1, bbox=(10, 10, 200, 40)),
+            ),
+            _LayoutElement(
+                1,
+                1,
+                BlockType.TABLE,
+                "| 组件 | 职责 |\n| --- | --- |\n| Worker | 解析 |",
+                SourceLocator(heading_path=("架构",), page=1, bbox=(10, 50, 300, 150)),
+            ),
+            _LayoutElement(
+                2,
+                1,
+                BlockType.IMAGE,
+                "",
+                SourceLocator(heading_path=("架构",), page=1, bbox=(10, 160, 300, 300)),
+                image=image.getvalue(),
+                caption="系统架构",
+            ),
+        ]
+    )
+
+    parsed = await PDFParser(
+        StubOCRClient(),
+        StubVisionClient(),
+        native_text_threshold=10,
+        layout_analyzer=layout,
+    ).parse(
+        _source(
+            "complex.pdf",
+            "application/pdf",
+            _native_text_pdf("Complex native PDF with enough text"),
+        )
+    )
+
+    assert [block.type for block in parsed.blocks] == [
+        BlockType.HEADING,
+        BlockType.TABLE,
+        BlockType.IMAGE,
+    ]
+    assert parsed.blocks[1].locator is not None
+    assert parsed.blocks[1].locator.bbox == (10, 50, 300, 150)
+    assert parsed.blocks[2].content == "架构图显示 API 指向 Worker。"
+    assert parsed.metadata["table_count"] == 1

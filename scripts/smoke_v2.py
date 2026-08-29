@@ -9,6 +9,7 @@ Parser、READY、来源定位、Milvus 检索与百炼流式问答，最后清�
 
 import argparse
 import json
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from io import BytesIO
@@ -140,8 +141,38 @@ def build_documents() -> list[SmokeDocument]:
 
     pdf_buffer = BytesIO()
     image.save(pdf_buffer, format="PDF", resolution=150)
-    documents.append(SmokeDocument("smoke.pdf", "application/pdf", pdf_buffer.getvalue(), "pdf"))
+    documents.append(
+        SmokeDocument(
+            "smoke.pdf",
+            "application/pdf",
+            pdf_buffer.getvalue(),
+            "pdf-docling",
+        )
+    )
     return documents
+
+
+def wait_until_ready(
+    client: httpx.Client,
+    document_id: str,
+    filename: str,
+    *,
+    timeout_seconds: float = 600.0,
+) -> dict[str, Any]:
+    """轮询公开详情端点，验证异步任务最终进入 READY 或给出明确失败。"""
+
+    deadline = time.monotonic() + timeout_seconds
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/documents/{document_id}")
+        require_success(response, f"poll {filename}")
+        latest = response.json()
+        if latest.get("status") == "READY":
+            return latest
+        if latest.get("status") == "FAILED":
+            raise RuntimeError(f"{filename} background ingestion failed: {latest}")
+        time.sleep(1)
+    raise TimeoutError(f"{filename} did not finish background ingestion: {latest}")
 
 
 def _verify_locator(parser_name: str, payload: dict[str, Any]) -> None:
@@ -150,7 +181,7 @@ def _verify_locator(parser_name: str, payload: dict[str, Any]) -> None:
     locator = payload.get("locator")
     if not isinstance(locator, dict):
         raise RuntimeError(f"retrieval result has no locator: {payload}")
-    if parser_name == "pdf" and locator.get("page") is None:
+    if parser_name == "pdf-docling" and locator.get("page") is None:
         raise RuntimeError(f"PDF retrieval result has no page: {payload}")
     if parser_name == "xlsx" and not locator.get("sheet"):
         raise RuntimeError(f"XLSX retrieval result has no sheet: {payload}")
@@ -180,7 +211,7 @@ def run_smoke_test(api_url: str, question: str) -> None:
             knowledge_base_id = str(create.json()["id"])
             print(f"[1/5] Knowledge base created: {knowledge_base_id}")
 
-            uploaded: dict[str, str] = {}
+            accepted_documents: list[tuple[str, SmokeDocument]] = []
             for document in documents:
                 response = client.post(
                     f"/api/knowledge-bases/{knowledge_base_id}/documents",
@@ -190,14 +221,22 @@ def run_smoke_test(api_url: str, question: str) -> None:
                 )
                 require_success(response, f"upload {document.filename}")
                 payload = response.json()
-                if payload.get("status") != "READY":
-                    raise RuntimeError(f"{document.filename} did not reach READY: {payload}")
+                if response.status_code != 202 or payload.get("status") != "PENDING":
+                    raise RuntimeError(
+                        f"{document.filename} was not accepted asynchronously: "
+                        f"HTTP {response.status_code} {payload}"
+                    )
+                accepted_documents.append((str(payload["id"]), document))
+
+            uploaded: dict[str, str] = {}
+            for document_id, document in accepted_documents:
+                payload = wait_until_ready(client, document_id, document.filename)
                 if payload.get("parser_name") != document.parser_name:
                     raise RuntimeError(
                         f"{document.filename} selected {payload.get('parser_name')}, "
                         f"expected {document.parser_name}"
                     )
-                uploaded[str(payload["id"])] = document.parser_name
+                uploaded[document_id] = document.parser_name
             print(f"[2/5] All {len(documents)} V2 formats reached READY")
 
             retrieval = client.post(
@@ -211,10 +250,10 @@ def run_smoke_test(api_url: str, question: str) -> None:
             located_formats: set[str] = set()
             for result in results:
                 parser_name = uploaded.get(str(result.get("document_id")))
-                if parser_name in {"pdf", "xlsx", "pptx"}:
+                if parser_name in {"pdf-docling", "xlsx", "pptx"}:
                     _verify_locator(parser_name, result)
                     located_formats.add(parser_name)
-            if located_formats != {"pdf", "xlsx", "pptx"}:
+            if located_formats != {"pdf-docling", "xlsx", "pptx"}:
                 raise RuntimeError(
                     "top-20 retrieval did not return every locator format: "
                     f"found={sorted(located_formats)}"
