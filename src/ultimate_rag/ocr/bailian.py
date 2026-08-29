@@ -10,13 +10,24 @@
 外部约束：
     百炼 OpenAI 兼容接口的 Base64 图片原文件必须小于 7 MB。调用使用配置提供的有界超时，
     不做无限重试；空响应和超限输入都显式失败，避免把空 OCR 文本继续送入 Embedding。
+
+手动验证：
+    本模块附带命令行入口，可直接对单张图片调用百炼 OCR 验证连通性：
+    ``uv run python src/ultimate_rag/ocr/bailian.py <图片路径>``
+    密钥、模型与超时读取自集中配置（环境变量或 ``.env``），会真实产生少量模型用量。
 """
 
+import argparse
+import asyncio
 import base64
+import mimetypes
+from pathlib import Path
 from typing import cast
 
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
+
+from ultimate_rag.config import get_settings
 
 
 class BailianOCRClient:
@@ -89,3 +100,51 @@ class BailianOCRClient:
         if not content or not content.strip():
             raise RuntimeError("OCR model returned empty text")
         return content.strip()
+
+
+
+
+# uv run python src/ultimate_rag/ocr/bailian.py ./data/1.png
+def main() -> None:
+    """命令行验证入口：对单张本地图片调用百炼 OCR 并打印识别文本。
+
+    该入口只用于开发期人工验证模型连通性与识别效果，不属于生产调用链；
+    生产路径统一经过 runtime.py 装配的 Parser。
+
+    Raises:
+        SystemExit: 扩展名无法映射为图片 MIME 类型时终止。
+        ValueError: 图片为空或超过配置的字节上限。
+        RuntimeError: 百炼返回空文本，或网络 / 鉴权失败（由 OpenAI SDK 异常上抛）。
+
+    Side Effects:
+        读取本地图片文件，真实调用百炼 Chat Completions 接口并产生模型用量。
+    """
+
+    parser = argparse.ArgumentParser(description="用百炼 Qwen-OCR 识别一张本地图片")
+    parser.add_argument("image", help="待识别的图片文件路径，例如 ./sample.png")
+    arguments = parser.parse_args()
+
+    # 扩展名到 MIME 的映射交给标准库；识别失败直接终止，避免把错误 MIME 送进 Data URL。
+    # 这里的扩展名判断仅服务于命令行入口，生产上传链路仍由 IngestionService 统一校验。
+    mime_type, _ = mimetypes.guess_type(arguments.image)
+    if not mime_type or not mime_type.startswith("image/"):
+        raise SystemExit(f"无法从扩展名识别图片 MIME 类型：{arguments.image}")
+
+    # 客户端参数与 runtime.py 的生产装配保持同源，验证结论才能代表 Worker 的真实行为。
+    settings = get_settings()
+    client = BailianOCRClient(
+        api_key=settings.dashscope_api_key,
+        base_url=settings.dashscope_base_url,
+        model=settings.ocr_model,
+        max_image_bytes=settings.ocr_max_image_bytes,
+        timeout=settings.model_timeout_seconds,
+    )
+
+    # extract_text 是异步方法；脚本只发起一次调用，用 asyncio.run 驱动即可，无需常驻事件循环。
+    image = Path(arguments.image).read_bytes()
+    text = asyncio.run(client.extract_text(image, mime_type))
+    print(text)
+
+
+if __name__ == "__main__":
+    main()

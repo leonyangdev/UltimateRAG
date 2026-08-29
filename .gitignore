@@ -15,3 +15,5 @@ apps/web/out/
 *.tsbuildinfo
 .idea/
 .vscode/
+
+.DS_Store
