@@ -1,0 +1,66 @@
+"""验证 Milvus 写入和删除完成后才向应用层报告成功。"""
+
+from typing import Any
+
+from ultimate_rag.vectorstores import MilvusVectorStore
+
+
+class FakeMilvusClient:
+    """记录 Milvus 调用顺序，用于验证持久化边界而不连接真实服务。"""
+
+    def __init__(self) -> None:
+        """初始化空调用记录。"""
+
+        self.calls: list[tuple[str, str]] = []
+
+    def upsert(self, *, collection_name: str, data: list[dict[str, Any]]) -> None:
+        """记录写入调用以及本批数据行数。"""
+
+        self.calls.append(("upsert", f"{collection_name}:{len(data)}"))
+
+    def delete(self, *, collection_name: str, filter: str) -> None:
+        """记录按业务范围删除的过滤表达式。"""
+
+        self.calls.append(("delete", f"{collection_name}:{filter}"))
+
+    def flush(self, *, collection_name: str) -> None:
+        """记录持久化调用，供测试断言其发生在变更之后。"""
+
+        self.calls.append(("flush", collection_name))
+
+
+def store_with_fake_client() -> tuple[MilvusVectorStore, FakeMilvusClient]:
+    """构造跳过真实网络初始化的向量存储与假客户端。"""
+
+    client = FakeMilvusClient()
+    store = object.__new__(MilvusVectorStore)
+    store._client = client  # type: ignore[assignment]
+    store._collection = "knowledge_chunks"
+    store._dimension = 2
+    return store, client
+
+
+def test_upsert_flushes_after_data_change() -> None:
+    """向量写入必须在 flush 完成后才允许应用层继续推进状态。"""
+
+    store, client = store_with_fake_client()
+
+    store._upsert_sync([{"id": "chunk-1"}])
+
+    assert client.calls == [
+        ("upsert", "knowledge_chunks:1"),
+        ("flush", "knowledge_chunks"),
+    ]
+
+
+def test_delete_flushes_after_data_change() -> None:
+    """删除操作必须持久化，避免 204 后旧向量在重启时重新出现。"""
+
+    store, client = store_with_fake_client()
+
+    store._delete_sync('document_id == "doc-1"')
+
+    assert client.calls == [
+        ("delete", 'knowledge_chunks:document_id == "doc-1"'),
+        ("flush", "knowledge_chunks"),
+    ]

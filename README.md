@@ -1,254 +1,258 @@
 # UltimateRAG
 
-![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
-![LangChain](https://img.shields.io/badge/LangChain-v1.x-orange)
-![License](https://img.shields.io/badge/License-MIT-green)
+一个从最小可用 RAG 持续演进为企业级知识平台的学习型工程。当前仓库实现 **V1.0 · Naive RAG**：
+它既能作为 RAG 全链路学习项目，也保留了真实企业系统需要的数据边界、失败状态、可替换端口和可测试性。
 
-一个按路线图逐步实现的 RAG 学习项目：从 **Naive RAG → Advanced RAG → Agentic RAG → GraphRAG & Fine-tuning → RAGOps**，在本地用 LangChain + 向量库把“文档问答”跑通，并逐步加入语义分块、混合检索、重排序、路由、自反思与工具调用等能力。
+## V1 能做什么
 
-从最简单的 Demo 进化到企业级、甚至科研级的 RAG 系统。
+用户可以在 Web 中完成以下闭环：
 
-路线图（五阶段总规划）见：`docs/README.md`。
+1. 创建知识库
+2. 上传 UTF-8 Markdown
+3. 查看文档从 `PENDING` 到 `READY` 的处理结果
+4. 使用 Milvus Dense Retrieval 独立调试召回内容和分数
+5. 使用阿里云百炼模型进行知识库问答
+6. 查看答案引用的文档、章节和 Chunk
+7. 删除文档或知识库，并同步清理三类存储
 
----
+V1 明确不包含 PDF、OCR、混合检索、Reranker、Agent、ACL、异步任务和 RAGOps；这些属于后续版本。
 
-## 项目目标
+## 架构
 
-- **学习目标**：把 RAG 的关键链路（Indexing / Retrieval / Generation / Evaluation）按阶段拆解实现，形成可复用模块。
-- **工程目标**：每个阶段都有可运行的 `main.py` 入口 + 可验证的单测，用最小闭环体现关键技术点与 trade-off。
+```text
+Next.js Web
+    │
+    ▼
+FastAPI Interface
+    │
+    ▼
+Application Services
+    ├── Ingestion: Parse → Chunk → Embed → Index
+    └── RAG: Query Embed → Retrieve → Context → Generate → Citation
+    │
+    ▼
+Domain Ports
+    ├── DocumentParser   → MarkdownParser
+    ├── Chunker          → StructureAwareMarkdownChunker
+    ├── Embedder         → BailianEmbedder
+    ├── VectorStore      → MilvusVectorStore
+    ├── ObjectStorage    → MinioObjectStorage
+    └── LLMClient        → BailianLLMClient
 
----
+事实数据：PostgreSQL + MinIO
+派生索引：Milvus
+```
 
-## 路线图与当前进展（对齐 `docs/README.md`）
+关键原则：
 
-| Roadmap Phase                                  | 对应实现       | 状态      | 你能在代码里看到什么                              |
-| ---------------------------------------------- | -------------- | --------- | ------------------------------------------------- |
-| Phase 1: MVP（Hello World）                    | `src/stage_1/` | ✅ 已实现 | 文档加载/分块/向量化/检索/问答闭环                |
-| Phase 2: Advanced RAG（解决检索不准）          | `src/stage_2/` | ✅ 已实现 | 语义分块、元数据、混合检索、Query Rewrite、Rerank |
-| Phase 3: Modular & Agentic RAG（解决逻辑复杂） | `src/stage_3/` | ✅ 已实现 | 路由、自反思、工具调用、父子索引、上下文压缩      |
-| Phase 4: GraphRAG & Fine-tuning（深度认知）    | -              | ✅ 已实现 | 知识图谱、领域适配（Embedding/LLM）               |
-| Phase 5: RAGOps（持续迭代）                    | -              | ⏳ 规划中 | 评估/可观测性/自动化回归                          |
+- Domain 不依赖 FastAPI、SQLAlchemy、Milvus、OpenAI SDK 或 LangChain
+- PostgreSQL 保存知识库、文档状态和 Chunk 元数据
+- MinIO 保存原始 Markdown，且对象键由系统生成
+- Milvus 只保存可重建向量索引，不作为业务事实数据源
+- 文档仅在 Parse、Chunk、Embedding、Index 全部成功后进入 `READY`
+- 知识库内容按不可信输入处理，不能覆盖系统 Prompt
 
-每个已实现阶段的学习总结与使用方式：
+详细设计见 [V1 实现说明](docs/3.v1_implementation.md)。
 
-- `docs/stage_1/README.md`
-- `docs/stage_2/README.md`
-- `docs/stage_3/README.md`
+## 技术栈
 
----
+- Python 3.12、FastAPI、Pydantic v2
+- SQLAlchemy 2、Alembic、PostgreSQL 16
+- MinIO、Milvus 2.5、Attu
+- 阿里云百炼 OpenAI 兼容 API
+  - Embedding 默认 `text-embedding-v4`，1024 维
+  - LLM 默认 `qwen-plus`
+- Next.js 16、React 19、TypeScript、Tailwind CSS 4、shadcn/ui、AI SDK
+- uv、pytest、Ruff、Mypy
 
-## 每阶段技术栈与知识点（你将学到什么）
+## 快速开始：Docker Compose
 
-### Stage 1（Phase 1 / MVP）
+### 1. 准备模型配置
 
-- **技术栈**
-  - **Orchestration**：LangChain（LCEL/Runnable）
-  - **LLM / Embedding**：OpenAI-compatible API（`langchain-openai`）
-  - **Vector DB**：Chroma（`langchain-chroma`）
-  - **文档解析**：`pypdf`、`unstructured`（md）、`docx2txt`
-- **关键知识点**
-  - **文档加载**：按后缀选择 loader，统一产出 `Document`
-  - **分块策略**：固定分块 + overlap 的基本 trade-off
-  - **向量化与持久化**：Chroma 落盘、避免重复建库
-  - **最小 RAG 链**：检索 → 拼接上下文 → Prompt → 生成
-- **如何启动**
-  - `python -m src.stage_1.main --data ./data/documents`
+仓库根目录需要 `.env`：
 
-### Stage 2（Phase 2 / Advanced RAG）
+```dotenv
+DASHSCOPE_BASE_URL=https://你的百炼工作空间地址/compatible-mode/v1
+DASHSCOPE_API_KEY=你的API-Key
 
-- **技术栈**
-  - **语义分块**：基于 embedding 相似度/阈值的 chunk 边界判断（`SemanticChunker`）
-  - **Hybrid Retrieval**：BM25（`rank-bm25`）+ 向量检索 + 融合（RRF）
-  - **Query Rewrite / HyDE**：LLM 生成多路查询、假设答案检索
-  - **Rerank**：Cross-Encoder（`sentence-transformers` CrossEncoder，BGE-Reranker）
-- **关键知识点**
-  - **召回 vs 精排**：粗检索 Top-N + 重排序取 Top-K 的“银弹”结构
-  - **关键词检索补短板**：专有名词/缩写对向量检索不友好
-  - **查询改写提升召回**：把用户表达翻译成“更可检索”的问题
-- **如何启动**
-  - `python -m src.stage_2.main --data ./data/documents`
+# 可选覆盖
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSION=1024
+LLM_MODEL=qwen-plus
 
-### Stage 3（Phase 3 / Agentic RAG）
+# 可选；留空时浏览器自动访问当前页面主机的 8000 端口
+NEXT_PUBLIC_API_URL=
+```
 
-- **技术栈**
-  - **Routing**：LLM 结构化输出（`pydantic`）做路由决策与兜底
-  - **Self-RAG**：相关性/质量自评估 + 多轮重检索
-  - **Tool Use**：Web 搜索（`ddgs`）、计算器、受限 Python 执行
-  - **Context 管理**：父子索引（精准匹配 + 完整上下文）、上下文压缩
-- **关键知识点**
-  - **从 Pipeline 到 Agent**：动态决策、按需调用能力与自我纠错
-  - **成本/延迟意识**：路由与多轮迭代会增加调用次数与耗时
-  - **安全边界**：代码执行沙箱与白名单控制
-- **如何启动**
-  - `python -m src.stage_3.main --data ./data/documents`
+不要提交 `.env`。仓库中的 `.env.example` 列出了全部配置项，但不含真实密钥。
+API 容器通过 Compose 的 `env_file` 直接读取项目 `.env` 中的百炼地址和密钥，避免开发机残留的同名环境变量意外覆盖项目配置。
 
-### Stage 4（Phase 4 / GraphRAG & Fine-tuning）
-
-- **目标**
-  - **GraphRAG**：用结构化关系（实体-关系图）增强跨文档、跨章节的关联检索与推理
-  - **Fine-tuning / 领域适配**：让 embedding/LLM 更懂领域术语、提升召回与回答风格一致性
-- **技术栈（候选）**
-  - **图数据库**：Neo4j / NebulaGraph（或微软 GraphRAG 思路）
-  - **信息抽取**：LLM 抽取实体/关系、或者规则+模型混合抽取
-  - **检索**：Graph traversal + 向量检索（Hybrid: Graph + Vector）
-  - **模型适配**：Embedding 微调、提示词/对齐、必要时 SFT/LoRA
-- **关键知识点**
-  - **向量检索的边界**：相似度无法表达“关系路径”，图检索擅长“链路/因果/关联”问题
-  - **建图成本与增量更新**：抽取质量、去重对齐、图更新策略
-- **如何启动**
-  - 暂未实现（后续会在根目录补 `src/stage_4/` 与入口）
-
-### Stage 5（Phase 5 / RAGOps）
-
-- **状态**：⏳ 规划中（路线图见 `docs/README.md`）
-- **目标**
-  - **可评估**：能量化“检索是否命中、回答是否可靠”，并沉淀可复现的基准集
-  - **可观测**：记录每次检索/生成链路的关键数据，支持 badcase 回溯与成本监控
-  - **可持续迭代**：每次改动能自动回归，避免效果回退
-- **技术栈（候选）**
-  - **评估**：RAGAS / TruLens（或自建黄金集 + 指标）
-  - **可观测**：LangSmith / Arize Phoenix（或自建 trace/log）
-  - **自动化**：CI 跑单测 + 基准评估 + 报告产出
-- **关键知识点**
-  - **离线评估 vs 在线反馈**：指标体系、数据闭环与回归策略
-  - **成本与延迟预算**：token、调用次数、模型/检索开销的可视化
-- **如何启动**
-  - 暂未实现（后续会补评估脚本与流水线配置）
-
----
-
-## 环境要求
-
-- **Python**：建议 3.10+
-- **网络**：需要访问你配置的 LLM/Embedding API（或 OpenAI-compatible 端点）
-
----
-
-## 快速开始（统一启动流程）
-
-### 1) 安装依赖
+### 2. 启动完整系统
 
 ```bash
-python -m venv .venv
-
-# Windows (PowerShell)
-# .\.venv\Scripts\Activate.ps1
-
-# Git Bash / macOS / Linux
-# source .venv/bin/activate
-
-pip install -r requirements.txt
+docker compose up -d --build
 ```
 
-### 2) 配置 `.env`
-
-以根目录 `.env.example` 为模板创建 `.env`：
+首次启动需要下载 PostgreSQL、MinIO、Milvus、Attu、Python 和 Node 镜像。查看状态：
 
 ```bash
-# Git Bash / macOS / Linux
-cp .env.example .env
+docker compose ps
+docker compose logs -f api
 ```
 
-Windows（PowerShell）：
+### 3. 打开服务
 
-```powershell
-Copy-Item .env.example .env
-```
+| 服务 | 地址 | 用途 |
+|---|---|---|
+| Web | http://localhost:3000 | 知识库、文档、问答和检索调试 |
+| FastAPI Docs | http://localhost:8000/docs | API 调试 |
+| MinIO Console | http://localhost:9001 | 查看原始文件 |
+| Attu | http://localhost:8001 | 查看 Milvus Collection 与向量 |
 
-至少配置一个 API Key（二选一即可）：
+MinIO 本地开发账号由 `docker-compose.yml` 提供，只用于本地环境。生产部署必须更换。
 
-- **`OPENAI_API_KEY`**：OpenAI / OpenAI-compatible（DeepSeek、Qwen、Moonshot 等）
-- **`DASHSCOPE_API_KEY`**：阿里云 DashScope（OpenAI 兼容）
+局域网可以通过 `http://192.168.3.19:3000` 打开 Web。未设置 `NEXT_PUBLIC_API_URL` 时，
+前端会自动请求 `http://192.168.3.19:8000`；API 的 CORS 配置已允许该来源。
 
-常用可选项：
-
-- **`OPENAI_BASE_URL`**：OpenAI-compatible Base URL
-- **`MODEL_NAME`**：默认 `gpt-4o`
-- **`EMBEDDING_MODEL`**：默认 `text-embedding-3-small`
-- **`CHROMA_PERSIST_DIR`**：默认 `./data/chroma_db`
-
-### 3) 准备数据
-
-默认读取 `./data/documents`，支持：`.pdf / .md / .txt / .docx`。
-
-### 4) 启动任一阶段
-
-- Stage 1：`python -m src.stage_1.main --data ./data/documents`
-- Stage 2：`python -m src.stage_2.main --data ./data/documents`
-- Stage 3：`python -m src.stage_3.main --data ./data/documents`
-
----
-
-## 启动参数与交互命令
-
-### Stage 1
-
-- **参数**：`--reindex`
-- **交互**：`sources`（显示/隐藏来源）、`quit/exit/q`
-
-### Stage 2
-
-- **参数**：`--reindex`、`--no-semantic`、`--no-rerank`
-- **交互**：`detail`（详细信息）
-
-### Stage 3
-
-- **参数**：`--reindex`、`--no-semantic`、`--no-routing`、`--no-self-rag`、`--no-tools`、`--no-parent-child`、`--no-compression`
-- **交互**：`help`（能力说明）、`detail`（详细信息）
-
----
-
-## 向量库与缓存说明
-
-- Chroma 默认落盘在 `CHROMA_PERSIST_DIR`（默认 `./data/chroma_db`）
-- 不同阶段使用不同集合名：
-  - Stage 1：`rag_documents`
-  - Stage 2：`advanced_rag`
-  - Stage 3：`agentic_rag`
-
----
-
-## 测试
-
-建议显式设置 `PYTHONPATH=src`：
+### 4. 停止服务
 
 ```bash
-# Git Bash / macOS / Linux
-PYTHONPATH=src pytest -q
+docker compose down
 ```
 
-Windows（PowerShell）：
+保留数据卷时不要加 `-v`。只有明确希望删除全部本地数据时，才执行：
 
-```powershell
-$env:PYTHONPATH="src"
-pytest -q
+```bash
+docker compose down -v
 ```
 
----
+## 本地开发
 
-## 常见问题（Troubleshooting）
+### 后端
 
-- **启动时报 “OPENAI_API_KEY / DASHSCOPE_API_KEY 未设置”**
-  - 确认根目录存在 `.env` 且填写了 `OPENAI_API_KEY` 或 `DASHSCOPE_API_KEY`
-- **加载 `.pdf/.docx` 报错**
-  - 依赖：`pypdf / unstructured / python-docx / docx2txt`；若遇到系统级依赖问题，可先用 `.md/.txt` 验证主流程
-- **Stage 2 重排序首次运行很慢**
-  - `sentence-transformers` 会下载 CrossEncoder 模型，属于正常现象
+先只启动基础设施：
 
----
+```bash
+docker compose up -d postgres minio etcd milvus attu
+uv sync
+uv run alembic upgrade head
+uv run uvicorn --app-dir apps api.app:app --reload
+```
 
-## 文档索引
+默认本地配置在 `.env.example` 中。Alembic 是唯一数据库 Schema 变更入口，应用启动不会自动建表。
 
-- **路线图总览**：`docs/README.md`
-- **阶段总结**：`docs/stage_1/README.md`、`docs/stage_2/README.md`、`docs/stage_3/README.md`
+### 前端
 
-## 加入组织一起交流 AI 技术
+```bash
+cd apps/web
+npm install
+npm run dev
+```
 
-<div align="center" style="display: flex; align-items: flex-end; gap: 20px;">
-  <img src="./data/images/my_wechat.jpg" alt="我的微信" width="300" style="object-fit: contain;"/>
-  <img src="./data/images/wechat_group.jpeg" alt="微信群二维码" width="300" style="object-fit: contain;" />
-</div>
+未设置 `NEXT_PUBLIC_API_URL` 时，浏览器使用当前页面主机的 `8000` 端口。例如从
+`192.168.3.19:3000` 打开页面时会请求 `192.168.3.19:8000`。如果 API 使用独立域名，需在
+`.env` 设置 `NEXT_PUBLIC_API_URL` 并重新构建前端。
 
-## Star History
+## API 概览
 
-[![Star History Chart](https://api.star-history.com/svg?repos=hefeng6500/UltimateRAG&type=date&legend=top-left)](https://www.star-history.com/#hefeng6500/UltimateRAG&type=date&legend=top-left)
+### Knowledge Base
+
+```text
+POST   /api/knowledge-bases
+GET    /api/knowledge-bases
+GET    /api/knowledge-bases/{id}
+DELETE /api/knowledge-bases/{id}
+```
+
+### Document
+
+```text
+POST   /api/knowledge-bases/{id}/documents
+GET    /api/knowledge-bases/{id}/documents
+GET    /api/documents/{id}
+DELETE /api/documents/{id}
+```
+
+### Retrieval 与 Chat
+
+```text
+POST /api/retrieval/search
+POST /api/chat
+POST /api/chat/stream
+```
+
+检索请求：
+
+```json
+{
+  "knowledge_base_id": "kb-id",
+  "query": "BGE-M3 是什么？",
+  "top_k": 5
+}
+```
+
+问答请求使用 `question` 字段。响应同时包含 `answer`、`citations` 和用于学习调试的
+`retrieval_results`。
+
+## 文档处理状态
+
+```text
+PENDING → PARSING → CHUNKING → EMBEDDING → INDEXING → READY
+                                                       └→ FAILED（任一处理阶段失败）
+```
+
+失败文档保留原文件与错误状态，方便定位问题和未来重建。V1 是同步管线，因此上传请求会等待处理完成。
+
+## 验证
+
+```bash
+# 后端
+uv run pytest
+uv run ruff check .
+uv run mypy
+
+# 前端
+cd apps/web
+npm run lint
+npm run build
+npm audit
+```
+
+固定 Smoke Test 文档位于 `tests/fixtures/rag.md`，推荐问题是“BGE-M3 是什么？”。
+
+启动 Docker 全栈后，执行真实 PostgreSQL、MinIO、Milvus 和百炼闭环验收：
+
+```bash
+uv run python scripts/smoke_v1.py --api-url http://localhost:8000
+```
+
+脚本会创建临时知识库、上传 Fixture、验证文档 `READY`、检索命中、流式答案和 Citation，
+最后删除临时知识库及其跨存储资源。
+
+## 目录
+
+```text
+apps/web/                         Next.js Web
+apps/api/                         FastAPI 应用
+src/ultimate_rag/domain/          领域模型与端口
+src/ultimate_rag/application/     显式业务工作流
+src/ultimate_rag/parsers/         Markdown 解析与注册表
+src/ultimate_rag/chunkers/        结构感知切块
+src/ultimate_rag/embeddings/      百炼向量适配器
+src/ultimate_rag/vectorstores/    Milvus 适配器
+src/ultimate_rag/generation/      百炼 LLM 适配器
+src/ultimate_rag/infrastructure/  PostgreSQL / MinIO
+alembic/                          数据库迁移
+scripts/                          可重复执行的发布验收脚本
+tests/                            单元测试与固定文档
+docs/                             产品、架构与实现文档
+```
+
+## 安全提醒
+
+- 上传文件必须是 UTF-8 Markdown，最大 10 MB
+- 用户文件名不参与本地路径或对象键构造
+- `.env`、API Key 和生产凭据禁止提交
+- 默认 Docker 密码只适合本地开发
+- 检索内容和 LLM 输出都视为不可信数据
+- 对公网部署前仍需要认证、ACL、限流与审计；这些不属于 V1 范围

@@ -1,0 +1,57 @@
+[project]
+name = "ultimate-rag"
+version = "1.0.0"
+description = "An evolvable enterprise-grade RAG platform"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.16,<2",
+    "asyncpg>=0.30,<1",
+    "fastapi>=0.116,<1",
+    # OpenAI SDK 通过 HTTPX 自动读取 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY。
+    # 本地开发常使用 SOCKS 代理访问百炼，因此运行时必须包含 socksio 可选传输依赖。
+    "httpx[socks]>=0.28,<1",
+    "markdown-it-py>=4,<5",
+    "minio>=7.2,<8",
+    "openai>=1.99,<3",
+    "pydantic-settings>=2.10,<3",
+    "pymilvus>=2.5,<3",
+    "python-multipart>=0.0.20,<1",
+    "sqlalchemy[asyncio]>=2.0.41,<3",
+    "uvicorn[standard]>=0.35,<1",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.17,<2",
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1.1,<2",
+    "ruff>=0.12,<1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ultimate_rag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["apps"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+# ultimate_rag 核心库位于 src 布局，API 应用包位于 apps/api；mypy 的 packages 配置项
+# 不支持配合 mypy_path 定位未安装包，因此这里直接按路径检查两个包。
+files = ["src/ultimate_rag", "apps/api"]

@@ -1,0 +1,207 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.75rem;
+  --background: oklch(0.982 0.006 85);
+  --foreground: oklch(0.205 0.018 255);
+  --card: oklch(0.998 0.002 85);
+  --card-foreground: oklch(0.205 0.018 255);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.205 0.018 255);
+  --primary: oklch(0.52 0.145 55);
+  --primary-foreground: oklch(0.985 0.005 85);
+  --secondary: oklch(0.95 0.012 80);
+  --secondary-foreground: oklch(0.28 0.025 255);
+  --muted: oklch(0.955 0.008 85);
+  --muted-foreground: oklch(0.51 0.02 255);
+  --accent: oklch(0.94 0.025 70);
+  --accent-foreground: oklch(0.32 0.06 55);
+  --destructive: oklch(0.58 0.21 25);
+  --border: oklch(0.89 0.012 80);
+  --input: oklch(0.87 0.014 80);
+  --ring: oklch(0.58 0.14 60);
+  --chart-1: oklch(0.58 0.15 55);
+  --chart-2: oklch(0.55 0.1 185);
+  --chart-3: oklch(0.46 0.08 245);
+  --chart-4: oklch(0.72 0.14 95);
+  --chart-5: oklch(0.62 0.17 30);
+}
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply min-h-screen bg-background text-foreground antialiased;
+  }
+
+  button,
+  a {
+    @apply cursor-pointer;
+  }
+}
+
+/*
+ * 聊天消息中的 Markdown 排版样式。
+ * 不使用 @tailwindcss/typography 插件，而是手写精简规则，
+ * 只覆盖聊天场景实际需要的 Markdown 元素，避免引入大量未使用的样式。
+ */
+.prose-chat {
+  > * + * {
+    margin-top: 0.75em;
+  }
+
+  /* 标题 */
+  h1, h2, h3, h4, h5, h6 {
+    font-weight: 600;
+    line-height: 1.4;
+    margin-top: 1.25em;
+    margin-bottom: 0.5em;
+  }
+  h1 { font-size: 1.25em; }
+  h2 { font-size: 1.125em; }
+  h3 { font-size: 1.05em; }
+
+  /* 段落 */
+  p {
+    margin-top: 0.5em;
+    margin-bottom: 0.5em;
+  }
+
+  /* 加粗、斜体 */
+  strong { font-weight: 600; }
+  em { font-style: italic; }
+
+  /* 有序 / 无序列表 */
+  ul, ol {
+    padding-left: 1.5em;
+    margin-top: 0.5em;
+    margin-bottom: 0.5em;
+  }
+  ul { list-style-type: disc; }
+  ol { list-style-type: decimal; }
+  li {
+    margin-top: 0.25em;
+    margin-bottom: 0.25em;
+  }
+  li > ul, li > ol {
+    margin-top: 0.125em;
+    margin-bottom: 0.125em;
+  }
+
+  /* 行内代码 */
+  :not(pre) > code {
+    background: oklch(0.94 0.008 85);
+    border: 1px solid oklch(0.89 0.012 80);
+    border-radius: 0.25em;
+    padding: 0.15em 0.35em;
+    font-size: 0.875em;
+    font-family: var(--font-geist-mono), ui-monospace, monospace;
+  }
+
+  /* 代码块 */
+  pre {
+    background: oklch(0.2 0.015 260);
+    color: oklch(0.92 0.008 85);
+    border-radius: 0.5rem;
+    padding: 0.875rem 1rem;
+    overflow-x: auto;
+    font-size: 0.8125em;
+    line-height: 1.6;
+    margin-top: 0.75em;
+    margin-bottom: 0.75em;
+    font-family: var(--font-geist-mono), ui-monospace, monospace;
+  }
+  pre code {
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+    color: inherit;
+  }
+
+  /* 引用块 */
+  blockquote {
+    border-left: 3px solid oklch(0.52 0.145 55);
+    padding-left: 1em;
+    margin-top: 0.75em;
+    margin-bottom: 0.75em;
+    color: oklch(0.45 0.02 255);
+    font-style: italic;
+  }
+
+  /* 表格 */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875em;
+    margin-top: 0.75em;
+    margin-bottom: 0.75em;
+  }
+  th, td {
+    border: 1px solid oklch(0.89 0.012 80);
+    padding: 0.5em 0.75em;
+    text-align: left;
+  }
+  th {
+    background: oklch(0.96 0.006 85);
+    font-weight: 600;
+  }
+  tr:nth-child(even) td {
+    background: oklch(0.985 0.003 85);
+  }
+
+  /* 分割线 */
+  hr {
+    border: none;
+    border-top: 1px solid oklch(0.89 0.012 80);
+    margin: 1em 0;
+  }
+
+  /* 链接 */
+  a {
+    color: oklch(0.52 0.145 55);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  a:hover {
+    color: oklch(0.45 0.14 55);
+  }
+}
