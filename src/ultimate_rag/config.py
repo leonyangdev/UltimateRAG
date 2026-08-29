@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """UltimateRAG V1 的集中配置模型。
+    """UltimateRAG V2 的集中配置模型。
 
     默认值面向本地 Docker Compose 开发环境；密钥必须由环境变量或未提交的 ``.env`` 提供。
     """
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     # NoDecode 把原始字符串交给下方校验器，避免 Settings 在校验前强制按 JSON 解码。
     cors_origins: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["http://localhost:3000"]
+        default_factory=lambda: ["http://localhost:3000", "http://192.168.3.19:3000"]
     )
 
     database_url: str = "postgresql+asyncpg://ultimate_rag:ultimate_rag@localhost:5432/ultimate_rag"
@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     embedding_dimension: int = 1024
     embedding_batch_size: int = 10
     llm_model: str = "qwen-plus"
+    ocr_model: str = "qwen-vl-ocr-latest"
+    # 百炼 Base64 OCR 接口要求原图小于 7 MB；默认留出编码和服务端校验余量。
+    ocr_max_image_bytes: int = 6 * 1024 * 1024
     model_timeout_seconds: float = 60.0
 
     max_upload_bytes: int = 10 * 1024 * 1024
@@ -56,6 +59,8 @@ class Settings(BaseSettings):
     chunk_overlap_chars: int = 160
     retrieval_top_k: int = 5
     context_max_chars: int = 12000
+    pdf_native_text_threshold: int = 20
+    pdf_render_scale: float = 1.5
 
     @field_validator("cors_origins", mode="before")
     @classmethod

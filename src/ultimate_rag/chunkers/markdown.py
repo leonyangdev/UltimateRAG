@@ -23,11 +23,11 @@
 import re
 from uuid import NAMESPACE_URL, uuid5
 
-from ultimate_rag.domain.models import BlockType, Chunk, ParsedDocument
+from ultimate_rag.domain.models import BlockType, Chunk, ParsedDocument, SourceLocator
 
 
-class StructureAwareMarkdownChunker:
-    """按章节结构和字符预算生成可追溯、可重复计算的 Chunk。
+class StructureAwareChunker:
+    """按来源位置、章节结构和字符预算生成可追溯的 Chunk。
 
     本类是无状态切块策略；构造后只保存字符预算。相同 ``document_id``、Block 顺序和内容
     会生成相同 Chunk ID，以支持摄取重试时的数据库替换与向量 Upsert。
@@ -58,25 +58,25 @@ class StructureAwareMarkdownChunker:
 
         # 阶段 1 — Build Sections：先把连续正文 Block 聚合到各自的标题路径下。
         # 标题路径与正文一起保存，章节稍后即使拆成多个 Chunk，Citation 仍能定位原始章节。
-        sections: list[tuple[tuple[str, ...], str]] = []
-        current_path: tuple[str, ...] = ()
+        sections: list[tuple[SourceLocator, str]] = []
+        current_locator = SourceLocator()
         current_parts: list[str] = []
 
         for block in document.blocks:
-            block_path = block.locator.heading_path if block.locator else ()
+            block_locator = block.locator or SourceLocator()
             if block.type == BlockType.HEADING:
                 # Heading Block 标记上一章节结束。标题文字已经存在于 heading_path，
                 # 因此不把它重复追加到正文；最终由 _with_heading() 统一添加一次完整路径。
-                self._flush_section(sections, current_path, current_parts)
-                current_path = block_path
+                self._flush_section(sections, current_locator, current_parts)
+                current_locator = block_locator
                 current_parts = []
                 continue
-            if block_path != current_path and current_parts:
-                # Markdown Parser 通常会先产生 Heading Block；这个保护分支也支持未来 Parser
-                # 直接改变 SourceLocator，避免不同来源路径的正文被错误合并为同一章节。
-                self._flush_section(sections, current_path, current_parts)
+            if block_locator != current_locator and current_parts:
+                # V2 的页码、工作表、单元格范围或幻灯片变化都必须形成新的来源区间；
+                # 不能只比较标题路径，否则 PDF 相邻页面会被合并并丢失精确引用位置。
+                self._flush_section(sections, current_locator, current_parts)
                 current_parts = []
-            current_path = block_path
+            current_locator = block_locator
 
             # CODE Block 只保存代码正文，这里恢复通用围栏，让 Embedding 输入仍能区分代码
             # 与普通段落。V1 没有在领域模型中保存原始语言标记，因此不会尝试伪造语言名称。
@@ -85,12 +85,13 @@ class StructureAwareMarkdownChunker:
             current_parts.append(f"{prefix}{block.content}{suffix}")
 
         # 最后一个章节后面没有新的 Heading 触发 Flush，循环结束时必须显式提交。
-        self._flush_section(sections, current_path, current_parts)
+        self._flush_section(sections, current_locator, current_parts)
 
         # 阶段 2 — Split Sections：短章节保持完整，只有超预算章节才按段落和窗口继续切分。
         # 标题路径会写入每一段最终文本，使向量自身也携带局部结构语义。
         chunks: list[Chunk] = []
-        for heading_path, section in sections:
+        for locator, section in sections:
+            heading_path = locator.heading_path
             for piece in self._split_text(section):
                 content = self._with_heading(heading_path, piece)
                 index = len(chunks)
@@ -113,20 +114,21 @@ class StructureAwareMarkdownChunker:
                         content=content,
                         heading_path=heading_path,
                         token_count=self._estimate_tokens(content),
+                        locator=locator,
                     )
                 )
         return chunks
 
     @staticmethod
     def _flush_section(
-        sections: list[tuple[tuple[str, ...], str]],
-        heading_path: tuple[str, ...],
+        sections: list[tuple[SourceLocator, str]],
+        locator: SourceLocator,
         parts: list[str],
     ) -> None:
         """把当前非空章节规范化后追加到待切分列表。"""
         content = "\n\n".join(part.strip() for part in parts if part.strip()).strip()
         if content:
-            sections.append((heading_path, content))
+            sections.append((locator, content))
 
     def _split_text(self, text: str) -> list[str]:
         """优先把完整段落装入字符窗口，只对超长段落使用带 Overlap 的硬切分。
@@ -192,3 +194,7 @@ class StructureAwareMarkdownChunker:
         other_words = len(re.findall(r"[A-Za-z0-9_]+", text))
         punctuation = len(re.findall(r"[^\w\s\u4e00-\u9fff]", text))
         return chinese_chars + other_words + punctuation // 2
+
+
+# 兼容 V1 的公开类名，已有调用方无需迁移；新代码使用格式无关名称表达真实职责。
+StructureAwareMarkdownChunker = StructureAwareChunker

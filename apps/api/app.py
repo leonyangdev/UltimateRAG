@@ -9,7 +9,7 @@
     业务顺序由 Application Service 编排，外部协议细节由 Infrastructure Adapter 负责。
 
 设计背景：
-    V1 使用一个显式 Container 保存进程内共享依赖。相比在每个 Route 中临时创建客户端，
+    V2 使用一个显式 Container 保存进程内共享依赖。相比在每个 Route 中临时创建客户端，
     这种方式可以复用连接池并让对象生命周期可见；当前依赖数量有限，因此不引入 DI 框架。
 
 典型使用场景：
@@ -17,7 +17,7 @@
 
 注意事项 / 已知限制：
     数据库 Schema 只能通过 Alembic Migration 管理，启动过程不会自动建表。MinIO Bucket
-    或 Milvus Collection 初始化失败时应用不会进入请求服务阶段。V1 关闭时显式释放数据库
+    或 Milvus Collection 初始化失败时应用不会进入请求服务阶段。V2 关闭时显式释放数据库
     Engine；其他 Adapter 当前没有统一的异步关闭端口。
 """
 
@@ -38,7 +38,7 @@ from ultimate_rag.application import (
     RAGService,
     RetrievalService,
 )
-from ultimate_rag.chunkers import StructureAwareMarkdownChunker
+from ultimate_rag.chunkers import StructureAwareChunker
 from ultimate_rag.config import get_settings
 from ultimate_rag.domain.exceptions import (
     InvalidDocumentError,
@@ -49,7 +49,17 @@ from ultimate_rag.embeddings import BailianEmbedder
 from ultimate_rag.generation import BailianLLMClient
 from ultimate_rag.infrastructure.database import create_database
 from ultimate_rag.infrastructure.storage import MinioObjectStorage
-from ultimate_rag.parsers import MarkdownParser, ParserRegistry
+from ultimate_rag.ocr import BailianOCRClient
+from ultimate_rag.parsers import (
+    ExcelParser,
+    HtmlParser,
+    ImageOCRParser,
+    MarkdownParser,
+    ParserRegistry,
+    PDFParser,
+    PowerPointParser,
+    WordParser,
+)
 from ultimate_rag.vectorstores import MilvusVectorStore
 
 settings = get_settings()
@@ -61,7 +71,7 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """在 FastAPI 进程生命周期内创建、校验并暴露 V1 所需依赖。
+    """在 FastAPI 进程生命周期内创建、校验并暴露 V2 所需依赖。
 
     Lifespan 的启动部分严格先于 ``yield`` 执行。只有 MinIO Bucket 和 Milvus Collection
     均准备完成后，FastAPI 才开始接收请求；因此 Route 不需要处理“依赖尚未初始化”的状态。
@@ -110,20 +120,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         dimension=settings.embedding_dimension,
     )
 
-    # LLM 与 Embedder 共享百炼的 OpenAI-Compatible Endpoint 和 API Key，但模型职责不同：
-    # Embedder 只生成检索向量，LLMClient 只根据构造后的知识上下文生成最终答案。
+    # LLM、Embedder 与 OCR 共享百炼 Endpoint 和 API Key，但模型职责完全分离。
     llm = BailianLLMClient(
         api_key=settings.dashscope_api_key,
         base_url=settings.dashscope_base_url,
         model=settings.llm_model,
         timeout=settings.model_timeout_seconds,
     )
+    ocr = BailianOCRClient(
+        api_key=settings.dashscope_api_key,
+        base_url=settings.dashscope_base_url,
+        model=settings.ocr_model,
+        max_image_bytes=settings.ocr_max_image_bytes,
+        timeout=settings.model_timeout_seconds,
+    )
 
     # 阶段 3：装配不直接拥有外部资源的领域策略和应用服务。
     # Registry 隔离源格式与 Parser 选择，Chunker 负责统一 ParsedDocument 之后的切块；
     # RetrievalService 复用同一个 Embedder，保证查询向量与文档向量处于相同向量空间。
-    registry = ParserRegistry([MarkdownParser()])
-    chunker = StructureAwareMarkdownChunker(settings.chunk_max_chars, settings.chunk_overlap_chars)
+    registry = ParserRegistry(
+        [
+            MarkdownParser(),
+            WordParser(),
+            ExcelParser(),
+            PowerPointParser(),
+            HtmlParser(),
+            PDFParser(
+                ocr,
+                native_text_threshold=settings.pdf_native_text_threshold,
+                render_scale=settings.pdf_render_scale,
+            ),
+            ImageOCRParser(ocr),
+        ]
+    )
+    chunker = StructureAwareChunker(settings.chunk_max_chars, settings.chunk_overlap_chars)
     retrieval = RetrievalService(embedder, vector_store)
 
     # 阶段 4：把已经装配好的对象集中放入进程级 Container。
@@ -162,7 +192,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await engine.dispose()
 
 
-app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

@@ -92,7 +92,7 @@ export default function KnowledgeBaseWorkspacePage() {
     };
   }, [id]);
 
-  /** 上传 Markdown；同步 API 返回时文档已经完成 Parse → Chunk → Embed → Index。 */
+  /** 上传 V2 支持的文档；同步 API 返回时已完成 Parse → Chunk → Embed → Index。 */
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -148,7 +148,7 @@ export default function KnowledgeBaseWorkspacePage() {
             </h1>
             <Badge className="shrink-0 border-emerald-200 bg-emerald-50 text-sm text-emerald-700 shadow-none hover:bg-emerald-50">
               <span className="size-1 rounded-full bg-emerald-500" />
-              V1
+              V2
             </Badge>
           </div>
           <p className="mt-2 max-w-2xl text-base leading-7 text-muted-foreground">
@@ -202,17 +202,17 @@ export default function KnowledgeBaseWorkspacePage() {
             )}
             <div className="min-w-0">
               <span className="block text-base font-medium">
-                {isDocumentWorking ? "正在处理文档…" : "上传 Markdown 文档"}
+                {isDocumentWorking ? "正在处理文档…" : "上传文档"}
               </span>
               <span className="mt-1 block text-sm text-muted-foreground">
-                上传后自动完成解析、切块、向量化与索引 · UTF-8 · 最大 10 MB
+                Markdown、PDF、Word、Excel、PPT、HTML 或图片 · 最大 10 MB
               </span>
             </div>
             <input
               className="sr-only"
               type="file"
               name="document"
-              accept=".md,.markdown,text/markdown"
+              accept=".md,.markdown,.pdf,.docx,.xlsx,.pptx,.html,.htm,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp"
               disabled={isDocumentWorking}
               onChange={(event) => event.currentTarget.form?.requestSubmit()}
             />
@@ -224,7 +224,7 @@ export default function KnowledgeBaseWorkspacePage() {
             <FileText className="mx-auto size-6 text-muted-foreground/60" />
             <p className="mt-4 text-lg font-medium">还没有知识来源</p>
             <p className="mt-2 text-base leading-7 text-muted-foreground">
-              上传第一份 Markdown 后，即可在「知识问答」中就这些内容提问。
+              上传第一份文档后，即可在「知识问答」中就这些内容提问。
             </p>
           </div>
         ) : (
@@ -250,6 +250,11 @@ export default function KnowledgeBaseWorkspacePage() {
                       <Badge variant="outline" className={`text-sm ${presentation.className}`}>
                         {presentation.label}
                       </Badge>
+                      {document.parser_name && (
+                        <Badge variant="secondary" className="rounded-md font-mono text-sm">
+                          {document.parser_name}
+                        </Badge>
+                      )}
                       <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
                         <Clock3 className="size-4" />
                         {new Date(document.created_at).toLocaleString("zh-CN")}

@@ -13,8 +13,8 @@ from ultimate_rag.parsers import MarkdownParser, ParserRegistry
 
 
 @pytest.mark.asyncio
-async def test_ingestion_rejects_non_markdown_mime_before_storage() -> None:
-    """明显非文本 MIME 即使使用 .md 后缀，也不应写入 MinIO。"""
+async def test_ingestion_rejects_extension_mime_mismatch_before_storage() -> None:
+    """扩展名与 MIME 没有任何 Parser 同时支持时，不应写入 MinIO。"""
 
     repository = AsyncMock()
     repository.get_knowledge_base.return_value = object()
@@ -29,7 +29,7 @@ async def test_ingestion_rejects_non_markdown_mime_before_storage() -> None:
         max_upload_bytes=1024,
     )
 
-    with pytest.raises(InvalidDocumentError, match="MIME"):
+    with pytest.raises(InvalidDocumentError, match="不支持的文档类型"):
         await service.ingest(
             knowledge_base_id="kb-1",
             filename="disguised.md",

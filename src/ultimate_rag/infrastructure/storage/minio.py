@@ -40,7 +40,7 @@ class MinioObjectStorage:
         await asyncio.to_thread(ensure)
 
     async def put(self, object_key: str, content: bytes, content_type: str) -> None:
-        """上传内存中的 V1 文档内容，并保存标准 MIME 类型。"""
+        """上传内存中的原始文档内容，并保存标准 MIME 类型。"""
         await asyncio.to_thread(
             self._client.put_object,
             self._bucket,

@@ -1,11 +1,11 @@
-"""V1 文档生命周期、检索与生成应用服务。
+"""V2 文档生命周期、检索与生成应用服务。
 
 模块职责：
     以普通 Python Service 显式编排两条 RAG 主链路：
     ``Upload → Parse → Chunk → Embed → Index`` 与 ``Query → Retrieve → Generate``。
 
 架构边界：
-    本模块只依赖领域模型、领域端口和 Repository，不实现 Markdown 语法、Embedding 协议、
+    本模块只依赖领域模型、领域端口和 Repository，不实现具体文件语法、Embedding 协议、
     Milvus SDK 或 HTTP 路由。基础设施异常在这里转换为用户可理解的业务失败状态。
 
 设计背景：
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 class IngestionService:
-    """编排 Markdown 从上传字节到可检索向量的同步摄取流程。
+    """编排多格式文档从上传字节到可检索向量的同步摄取流程。
 
     本类位于 Application 层，负责输入边界、阶段顺序、文档状态和失败语义；Parser、Chunker、
     Embedder 与 VectorStore 的具体算法或外部协议由注入的端口实现，不在本类中处理。
@@ -50,16 +50,6 @@ class IngestionService:
     V1 不模拟分布式事务。原文件先落 MinIO，后续失败保留原文件与文档事实并标记 ``FAILED``；
     只有 PostgreSQL Chunk 与 Milvus 向量均成功写入后，文档才进入 ``READY``。
     """
-
-    # 浏览器和操作系统对 Markdown 的声明不统一，允许常见文本类型与通用二进制回退值。
-    MARKDOWN_MIME_TYPES = frozenset(
-        {
-            "text/markdown",
-            "text/plain",
-            "application/x-markdown",
-            "application/octet-stream",
-        }
-    )
 
     def __init__(
         self,
@@ -88,13 +78,13 @@ class IngestionService:
         mime_type: str,
         content: bytes,
     ) -> Document:
-        """校验、保存并同步处理一份 Markdown 文档。
+        """校验、保存并同步处理一份 V2 支持的文档。
 
         Args:
             knowledge_base_id: 文档所属知识库 ID。
             filename: 浏览器上传的展示文件名；只取 basename，不用于构造本地路径。
-            mime_type: 客户端声明的 MIME 类型，缺失时回退为 ``text/markdown``。
-            content: 原始文件字节，大小和 UTF-8 编码会在管线中验证。
+            mime_type: 客户端声明的 MIME 类型，缺失时回退为通用二进制类型。
+            content: 原始文件字节；Parser 会继续验证实际格式和内容。
 
         Returns:
             已完成处理且状态为 ``READY`` 的文档。
@@ -117,8 +107,8 @@ class IngestionService:
         # 真正的 Object Key 会使用系统 UUID 构造，因此同名上传不会覆盖，也不能路径穿越。
         safe_filename = PurePath(filename).name
         extension = PurePath(safe_filename).suffix.lower()
-        if extension not in {".md", ".markdown"}:
-            raise InvalidDocumentError("V1 仅支持 .md 或 .markdown 文件")
+        if not safe_filename or not extension:
+            raise InvalidDocumentError("上传文件必须包含安全的文件名和扩展名")
         if not content:
             raise InvalidDocumentError("上传文件不能为空")
         if len(content) > self._max_upload_bytes:
@@ -126,11 +116,8 @@ class IngestionService:
 
         # MIME 可能包含 ``charset`` 参数，比较前先归一化主类型。MIME 仍只是客户端声明，
         # 所以后续 Parser 必须继续验证 UTF-8 解码和实际文本内容，不能把它当作可信证据。
-        normalized_mime_type = (
-            mime_type.split(";", maxsplit=1)[0].strip().lower() or "text/markdown"
-        )
-        if normalized_mime_type not in self.MARKDOWN_MIME_TYPES:
-            raise InvalidDocumentError(f"不支持的 Markdown MIME 类型：{normalized_mime_type}")
+        normalized_mime_type = mime_type.split(";", maxsplit=1)[0].strip().lower()
+        normalized_mime_type = normalized_mime_type or "application/octet-stream"
 
         # 阶段 2：为原始文件生成稳定的系统定位信息，然后先保存文件、再创建文档事实。
         # Object Key 使用知识库 ID 与文档 UUID 隔离对象；SHA-256 记录上传内容指纹，
@@ -138,6 +125,12 @@ class IngestionService:
         document_id = str(uuid4())
         object_key = f"{knowledge_base_id}/{document_id}/source{extension}"
         sha256 = hashlib.sha256(content).hexdigest()
+
+        # 在保存原文件前让 Registry 同时检查扩展名和 MIME，未知格式不会产生 MinIO 孤儿对象。
+        # Parser 后续仍需检查真实文件签名/结构，因为 MIME 与扩展名都来自不可信客户端。
+        self._parser_registry.resolve(
+            DocumentSource(document_id, safe_filename, normalized_mime_type, content)
+        )
 
         # 原文件先于解析和索引持久化。进入处理阶段后即使失败，也不要求用户重新上传，
         # 并且可以使用 MinIO 中的事实数据重新构建 PostgreSQL Chunk 与 Milvus 派生索引。
@@ -221,7 +214,17 @@ class IngestionService:
 
         # Chunk 保持不可变；使用 dataclasses.replace 只添加展示用文件名。Milvus 检索命中后
         # 可以直接构造 Citation，避免为了每个 Hit 再查询一次 PostgreSQL 形成 N+1。
-        chunks = [replace(chunk, metadata={"filename": document.filename}) for chunk in chunks]
+        chunks = [
+            replace(
+                chunk,
+                metadata={
+                    **chunk.metadata,
+                    "filename": document.filename,
+                    "source_locator": chunk.locator.to_metadata() if chunk.locator else {},
+                },
+            )
+            for chunk in chunks
+        ]
 
         # 阶段 3 — Embed：应用层一次提交全部文本，Adapter 再按供应商 Batch 上限有界分批。
         # 这样业务流程不依赖百炼限制，也避免每个 Chunk 单独发一次网络请求。
@@ -390,6 +393,7 @@ class RAGService:
                 filename=result.filename,
                 chunk_id=result.chunk_id,
                 heading_path=result.heading_path,
+                locator=result.locator,
             )
             for result in results
         ]

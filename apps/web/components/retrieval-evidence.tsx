@@ -2,7 +2,7 @@ import { BookOpen, ChevronDown } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import type { Citation, RetrievalResult } from "@/app/lib";
+import { formatLocator, type Citation, type RetrievalResult } from "@/app/lib";
 
 interface RetrievalEvidenceProps {
   citations?: Citation[];
@@ -37,7 +37,8 @@ export function RetrievalEvidence({
       <div className="mt-2 grid gap-2">
         {results.map((result, index) => {
           const citation = citations.find((item) => item.chunk_id === result.chunk_id);
-          const heading = (citation?.heading_path ?? result.heading_path).join(" / ");
+          const locator = citation?.locator ?? result.locator;
+          const heading = formatLocator(locator, citation?.heading_path ?? result.heading_path);
 
           return (
             <Card key={result.chunk_id} className="border-border/70 bg-muted/35 py-0 shadow-none">
@@ -48,7 +49,7 @@ export function RetrievalEvidence({
                       [{index + 1}] {result.filename}
                     </p>
                     <p className="mt-1 truncate text-sm text-muted-foreground">
-                      {heading || "未命名章节"}
+                      {heading}
                     </p>
                   </div>
                   <Badge variant="outline" className="shrink-0 font-mono text-sm tabular-nums">

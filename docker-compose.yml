@@ -1,3 +1,4 @@
+# Compose 项目名保持稳定，V1 升级 V2 时继续复用已有事实数据卷。
 name: ultimate-rag-v1
 
 services:
@@ -100,6 +101,8 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
       LLM_MODEL: ${LLM_MODEL:-qwen-plus}
+      OCR_MODEL: ${OCR_MODEL:-qwen-vl-ocr-latest}
+      OCR_MAX_IMAGE_BYTES: ${OCR_MAX_IMAGE_BYTES:-6291456}
       CORS_ORIGINS: http://localhost:3000,http://192.168.3.19:3000
     ports:
       - "8000:8000"

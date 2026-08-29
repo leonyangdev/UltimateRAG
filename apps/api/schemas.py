@@ -7,7 +7,39 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ultimate_rag.domain.models import Citation, Document, KnowledgeBase, RetrievalResult
+from ultimate_rag.domain.models import (
+    Citation,
+    Document,
+    KnowledgeBase,
+    RetrievalResult,
+    SourceLocator,
+)
+
+
+class SourceLocatorResponse(BaseModel):
+    """跨格式原文位置；不同文档类型只填写适用字段。"""
+
+    heading_path: list[str] = Field(default_factory=list)
+    page: int | None = None
+    bbox: list[float] | None = None
+    sheet: str | None = None
+    cell_range: str | None = None
+    slide: int | None = None
+
+    @classmethod
+    def from_domain(cls, value: SourceLocator | None) -> "SourceLocatorResponse | None":
+        """把不可变 Locator 映射为 JSON 友好的 API 结构。"""
+
+        if value is None:
+            return None
+        return cls(
+            heading_path=list(value.heading_path),
+            page=value.page,
+            bbox=list(value.bbox) if value.bbox else None,
+            sheet=value.sheet,
+            cell_range=value.cell_range,
+            slide=value.slide,
+        )
 
 
 class KnowledgeBaseCreate(BaseModel):
@@ -93,6 +125,7 @@ class RetrievalResultResponse(BaseModel):
     filename: str
     content: str
     heading_path: list[str]
+    locator: SourceLocatorResponse | None
     score: float
 
     @classmethod
@@ -104,6 +137,7 @@ class RetrievalResultResponse(BaseModel):
             filename=value.filename,
             content=value.content,
             heading_path=list(value.heading_path),
+            locator=SourceLocatorResponse.from_domain(value.locator),
             score=value.score,
         )
 
@@ -122,6 +156,7 @@ class CitationResponse(BaseModel):
     filename: str
     chunk_id: str
     heading_path: list[str]
+    locator: SourceLocatorResponse | None
 
     @classmethod
     def from_domain(cls, value: Citation) -> "CitationResponse":
@@ -131,11 +166,12 @@ class CitationResponse(BaseModel):
             filename=value.filename,
             chunk_id=value.chunk_id,
             heading_path=list(value.heading_path),
+            locator=SourceLocatorResponse.from_domain(value.locator),
         )
 
 
 class ChatResponse(BaseModel):
-    """答案、引用和基础检索调试信息的完整 V1 响应。"""
+    """答案、跨格式引用和基础检索调试信息的完整 V2 响应。"""
 
     answer: str
     citations: list[CitationResponse]

@@ -20,7 +20,7 @@ from ultimate_rag.infrastructure.database.models import (
 
 
 class Repository:
-    """封装 V1 知识库、文档和 Chunk 的数据库读写。"""
+    """封装知识库、文档和 Chunk 的数据库事实读写。"""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         """接收可复用 Session 工厂，每个公共操作自行定义短事务。"""

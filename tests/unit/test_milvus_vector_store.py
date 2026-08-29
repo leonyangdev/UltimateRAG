@@ -64,3 +64,25 @@ def test_delete_flushes_after_data_change() -> None:
         ("delete", 'knowledge_chunks:document_id == "doc-1"'),
         ("flush", "knowledge_chunks"),
     ]
+
+
+def test_retrieval_result_reads_v2_locator_and_v1_heading_path() -> None:
+    """同一 JSON 字段必须兼容 V2 Locator 字典与升级前的 V1 标题数组。"""
+
+    common = {
+        "chunk_id": "chunk-1",
+        "knowledge_base_id": "kb-1",
+        "document_id": "doc-1",
+        "filename": "source.pdf",
+        "content": "content",
+    }
+    v2 = MilvusVectorStore._retrieval_result(
+        {"distance": 0.9, "entity": {**common, "heading_path": {"page": 3}}}
+    )
+    v1 = MilvusVectorStore._retrieval_result(
+        {"distance": 0.8, "entity": {**common, "heading_path": ["RAG", "Index"]}}
+    )
+
+    assert v2.locator is not None and v2.locator.page == 3
+    assert v1.heading_path == ("RAG", "Index")
+    assert v1.locator is not None and v1.locator.heading_path == ("RAG", "Index")

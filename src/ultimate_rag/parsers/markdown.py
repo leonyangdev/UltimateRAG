@@ -19,7 +19,6 @@
     V1 只保留标题、普通文本和代码块，不保留链接目标、图片、表格结构或代码语言标记。
 """
 
-from pathlib import PurePath
 from uuid import NAMESPACE_URL, uuid5
 
 from markdown_it import MarkdownIt
@@ -33,6 +32,7 @@ from ultimate_rag.domain.models import (
     ParsedDocument,
     SourceLocator,
 )
+from ultimate_rag.parsers._shared import supports_source
 
 
 class MarkdownParser:
@@ -43,15 +43,17 @@ class MarkdownParser:
     """
 
     name = "markdown"
-    version = "1.0"
+    version = "2.0"
+    _EXTENSIONS = frozenset({".md", ".markdown"})
+    _MIME_TYPES = frozenset({"text/markdown", "text/plain", "application/x-markdown"})
 
     def __init__(self) -> None:
         """创建启用 CommonMark 规则的无状态 Token 解析器。"""
         self._markdown = MarkdownIt("commonmark")
 
     def supports(self, source: DocumentSource) -> bool:
-        """V1 按安全归一化后的文件扩展名识别 Markdown。"""
-        return PurePath(source.filename).suffix.lower() in {".md", ".markdown"}
+        """同时校验 Markdown 扩展名与常见 MIME，通用二进制由内容校验兜底。"""
+        return supports_source(source, self._EXTENSIONS, self._MIME_TYPES)
 
     async def parse(self, source: DocumentSource) -> ParsedDocument:
         """校验并解析 Markdown 字节，返回带章节定位的统一文档。

@@ -27,7 +27,7 @@ from typing import Any
 
 from pymilvus import DataType, MilvusClient  # type: ignore[import-untyped]
 
-from ultimate_rag.domain.models import EmbeddedChunk, RetrievalResult
+from ultimate_rag.domain.models import EmbeddedChunk, RetrievalResult, SourceLocator
 
 
 class MilvusVectorStore:
@@ -117,7 +117,13 @@ class MilvusVectorStore:
                 "chunk_id": item.chunk.id,
                 "filename": str(item.chunk.metadata.get("filename", "")),
                 "content": item.chunk.content,
-                "heading_path": list(item.chunk.heading_path),
+                # 复用 V1 已有 JSON 字段保存 V2 SourceLocator，避免在应用启动时隐式迁移
+                # Milvus Schema。读取端兼容旧版 list，现有 V1 索引可以原地继续检索。
+                "heading_path": (
+                    item.chunk.locator.to_metadata()
+                    if item.chunk.locator
+                    else {"heading_path": list(item.chunk.heading_path)}
+                ),
                 "embedding": list(item.embedding),
             }
             for item in chunks
@@ -196,12 +202,19 @@ class MilvusVectorStore:
         # ``output_fields`` 位于 entity，COSINE 分数位于 Hit 顶层 distance。
         # heading_path 兼容缺失字段或 JSON null，并在领域边界冻结为 Tuple。
         entity = hit["entity"]
+        raw_locator = entity.get("heading_path")
+        if isinstance(raw_locator, dict):
+            locator = SourceLocator.from_metadata(raw_locator)
+        else:
+            # V1 行只保存标题数组；转换为统一 Locator 后无需重建已有 Collection。
+            locator = SourceLocator(heading_path=tuple(str(item) for item in (raw_locator or [])))
         return RetrievalResult(
             chunk_id=str(entity["chunk_id"]),
             knowledge_base_id=str(entity["knowledge_base_id"]),
             document_id=str(entity["document_id"]),
             filename=str(entity["filename"]),
             content=str(entity["content"]),
-            heading_path=tuple(entity.get("heading_path") or []),
+            heading_path=locator.heading_path,
             score=float(hit["distance"]),
+            locator=locator,
         )
