@@ -1,0 +1,56 @@
+# 构建 VitePress 文档站点并发布到 GitHub Pages。
+#
+# 触发条件：
+# - push 到 V2 分支且涉及 apps/docs/ 下文件变化
+# - 手动 workflow_dispatch（兜底，可在任意分支构建当前内容）
+#
+# 站点地址：https://leonyangdev.github.io/UltimateRAG/
+name: Deploy Docs to GitHub Pages
+
+on:
+  push:
+    branches: [V2]
+    paths: ['apps/docs/**']
+  workflow_dispatch:
+
+# 发布到 Pages 需要 id-token 与 pages 写权限；GitHub Actions 是 Pages 的唯一构建源。
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只保留一次发布，避免多次提交时并发部署互相覆盖。
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/docs/package-lock.json
+      - name: Install dependencies
+        working-directory: apps/docs
+        run: npm ci
+      - name: Build VitePress site
+        working-directory: apps/docs
+        run: npm run docs:build
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/docs/.vitepress/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
