@@ -1,6 +1,23 @@
 import type { UIMessage } from "ai";
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+/**
+ * 解析浏览器应访问的 FastAPI 地址。
+ *
+ * NEXT_PUBLIC_API_URL 在 Next.js 构建时内联，适合反向代理或独立域名部署。开发者没有
+ * 显式配置时，客户端沿用当前页面的协议和主机名并切换到 8000 端口：这样 localhost
+ * 开发与通过 192.168.3.19 访问局域网 Web 都能连接同一台主机上的 API。
+ * 服务端预渲染期间没有 window，回退值只用于生成静态页面，不会发起业务请求。
+ */
+function resolveApiUrl(): string {
+  const configuredUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (configuredUrl) return configuredUrl.replace(/\/$/, "");
+  if (typeof window !== "undefined") {
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  }
+  return "http://localhost:8000";
+}
+
+export const API_URL = resolveApiUrl();
 
 export interface KnowledgeBase {
   id: string;

@@ -37,6 +37,7 @@ from api.schemas import (
     RetrievalRequest,
     RetrievalResultResponse,
 )
+from ultimate_rag.domain.exceptions import InvalidDocumentError
 
 router = APIRouter(prefix="/api")
 logger = logging.getLogger(__name__)
@@ -55,6 +56,29 @@ def container(request: Request) -> Container:
     """从 FastAPI 应用状态读取 lifespan 已完成装配的依赖容器。"""
     value: Container = request.app.state.container
     return value
+
+
+async def _read_bounded_upload(file: UploadFile, max_upload_bytes: int) -> bytes:
+    """最多读取上传上限加一个字节，让超限请求在 HTTP 边界尽早失败。
+
+    应用服务仍保留同样的大小校验，因为它也可能被 CLI、测试或未来 Worker 直接调用；
+    HTTP 层的有界读取属于防御性保护，避免先把任意大的请求完整加载到进程内存后才拒绝。
+
+    Args:
+        file: FastAPI 已放入临时缓冲区的上传文件。
+        max_upload_bytes: 当前部署允许交给应用服务的最大字节数。
+
+    Returns:
+        不超过限制的完整文件内容。
+
+    Raises:
+        InvalidDocumentError: 读取到限制之外的额外字节时抛出。
+    """
+
+    content = await file.read(max_upload_bytes + 1)
+    if len(content) > max_upload_bytes:
+        raise InvalidDocumentError(f"文件不能超过 {max_upload_bytes // (1024 * 1024)} MB")
+    return content
 
 
 @router.get("/health")
@@ -110,8 +134,9 @@ async def upload_document(
     file: Annotated[UploadFile, File()],
 ) -> DocumentResponse:
     """上传并同步完成 Markdown 的解析、切块、向量化和索引。"""
-    content = await file.read()
-    value = await container(request).ingestion.ingest(
+    dependencies = container(request)
+    content = await _read_bounded_upload(file, dependencies.max_upload_bytes)
+    value = await dependencies.ingestion.ingest(
         knowledge_base_id,
         file.filename or "document.md",
         file.content_type or "text/markdown",

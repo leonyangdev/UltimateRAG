@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   MessageSquareText,
   Plus,
+  Trash2,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -45,6 +46,7 @@ export default function KnowledgeBasesPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const load = useCallback(async () => {
@@ -95,6 +97,30 @@ export default function KnowledgeBasesPage() {
       setError(value instanceof Error ? value.message : "知识库创建失败");
     } finally {
       setSaving(false);
+    }
+  }
+
+  /**
+   * 删除知识库及其文档、原文件和派生向量。
+   *
+   * V1 后端执行同步尽力删除，只有三类存储均清理成功才返回 204。前端因此等待请求完成后
+   * 再刷新列表，不做乐观删除，避免外部存储失败时界面提前隐藏仍可用于补偿的事实记录。
+   */
+  async function removeKnowledgeBase(item: KnowledgeBase) {
+    const confirmed = window.confirm(
+      `确认删除知识库“${item.name}”及其中全部文档和向量索引？此操作不可撤销。`,
+    );
+    if (!confirmed) return;
+
+    setDeletingId(item.id);
+    setError("");
+    try {
+      await api<void>(`/api/knowledge-bases/${item.id}`, { method: "DELETE" });
+      await load();
+    } catch (value) {
+      setError(value instanceof Error ? value.message : "知识库删除失败");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -209,29 +235,51 @@ export default function KnowledgeBasesPage() {
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {items.map((item, index) => (
-              <Link key={item.id} href={`/knowledge-bases/${item.id}`} className="group outline-none">
-                <Card className="h-full gap-5 transition duration-200 group-hover:-translate-y-1 group-hover:border-primary/30 group-hover:shadow-xl group-focus-visible:ring-2 group-focus-visible:ring-ring">
-                  <CardHeader>
-                    <div className="mb-5 flex items-center justify-between">
-                      <span className="grid size-10 place-items-center rounded-xl bg-accent text-accent-foreground">
-                        <Database className="size-4.5" />
+              <Card
+                key={item.id}
+                className="group h-full gap-5 transition duration-200 hover:-translate-y-1 hover:border-primary/30 hover:shadow-xl"
+              >
+                <CardHeader>
+                  <div className="mb-5 flex items-center justify-between">
+                    <span className="grid size-10 place-items-center rounded-xl bg-accent text-accent-foreground">
+                      <Database className="size-4.5" />
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <span className="font-mono text-sm text-muted-foreground">
+                        KB-{String(index + 1).padStart(2, "0")}
                       </span>
-                      <span className="font-mono text-sm text-muted-foreground">KB-{String(index + 1).padStart(2, "0")}</span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                        disabled={deletingId !== null}
+                        aria-label={`删除知识库 ${item.name}`}
+                        onClick={() => void removeKnowledgeBase(item)}
+                      >
+                        {deletingId === item.id ? (
+                          <LoaderCircle className="animate-spin" />
+                        ) : (
+                          <Trash2 />
+                        )}
+                      </Button>
                     </div>
-                    <CardTitle className="text-lg">{item.name}</CardTitle>
-                    <CardDescription className="line-clamp-2 min-h-11">
-                      {item.description || "尚未添加知识库描述"}
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="mt-auto flex items-center justify-between border-t pt-5 text-sm text-muted-foreground">
-                    <span>创建于 {new Date(item.created_at).toLocaleDateString("zh-CN")}</span>
-                    <span className="inline-flex items-center gap-1 font-medium text-foreground">
+                  </div>
+                  <CardTitle className="text-lg">{item.name}</CardTitle>
+                  <CardDescription className="line-clamp-2 min-h-11">
+                    {item.description || "尚未添加知识库描述"}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="mt-auto flex items-center justify-between border-t pt-5 text-sm text-muted-foreground">
+                  <span>创建于 {new Date(item.created_at).toLocaleDateString("zh-CN")}</span>
+                  <Button variant="link" className="h-auto gap-1 p-0 text-foreground" asChild>
+                    <Link href={`/knowledge-bases/${item.id}`}>
                       打开工作区
                       <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-1" />
-                    </span>
-                  </CardContent>
-                </Card>
-              </Link>
+                    </Link>
+                  </Button>
+                </CardContent>
+              </Card>
             ))}
           </div>
         )}

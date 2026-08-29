@@ -79,6 +79,9 @@ DASHSCOPE_API_KEY=你的API-Key
 EMBEDDING_MODEL=text-embedding-v4
 EMBEDDING_DIMENSION=1024
 LLM_MODEL=qwen-plus
+
+# 可选；留空时浏览器自动访问当前页面主机的 8000 端口
+NEXT_PUBLIC_API_URL=
 ```
 
 不要提交 `.env`。仓库中的 `.env.example` 列出了全部配置项，但不含真实密钥。
@@ -107,6 +110,9 @@ docker compose logs -f api
 | Attu | http://localhost:8001 | 查看 Milvus Collection 与向量 |
 
 MinIO 本地开发账号由 `docker-compose.yml` 提供，只用于本地环境。生产部署必须更换。
+
+局域网可以通过 `http://192.168.3.19:3000` 打开 Web。未设置 `NEXT_PUBLIC_API_URL` 时，
+前端会自动请求 `http://192.168.3.19:8000`；API 的 CORS 配置已允许该来源。
 
 ### 4. 停止服务
 
@@ -143,7 +149,9 @@ npm install
 npm run dev
 ```
 
-浏览器端默认请求 `http://localhost:8000`。如需修改，在 `.env` 设置 `NEXT_PUBLIC_API_URL` 后重新构建前端。
+未设置 `NEXT_PUBLIC_API_URL` 时，浏览器使用当前页面主机的 `8000` 端口。例如从
+`192.168.3.19:3000` 打开页面时会请求 `192.168.3.19:8000`。如果 API 使用独立域名，需在
+`.env` 设置 `NEXT_PUBLIC_API_URL` 并重新构建前端。
 
 ## API 概览
 
@@ -170,6 +178,7 @@ DELETE /api/documents/{id}
 ```text
 POST /api/retrieval/search
 POST /api/chat
+POST /api/chat/stream
 ```
 
 检索请求：
@@ -211,6 +220,15 @@ npm audit
 
 固定 Smoke Test 文档位于 `tests/fixtures/rag.md`，推荐问题是“BGE-M3 是什么？”。
 
+启动 Docker 全栈后，执行真实 PostgreSQL、MinIO、Milvus 和百炼闭环验收：
+
+```bash
+uv run python scripts/smoke_v1.py --api-url http://localhost:8000
+```
+
+脚本会创建临时知识库、上传 Fixture、验证文档 `READY`、检索命中、流式答案和 Citation，
+最后删除临时知识库及其跨存储资源。
+
 ## 目录
 
 ```text
@@ -225,6 +243,7 @@ src/ultimate_rag/vectorstores/    Milvus 适配器
 src/ultimate_rag/generation/      百炼 LLM 适配器
 src/ultimate_rag/infrastructure/  PostgreSQL / MinIO
 alembic/                          数据库迁移
+scripts/                          可重复执行的发布验收脚本
 tests/                            单元测试与固定文档
 docs/                             产品、架构与实现文档
 ```

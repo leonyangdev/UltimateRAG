@@ -116,7 +116,8 @@ services:
     build:
       context: apps/web
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        # 留空时前端会根据浏览器当前主机自动连接 8000 端口，兼容 localhost 与局域网访问。
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
     ports:
       - "3000:3000"
     depends_on:

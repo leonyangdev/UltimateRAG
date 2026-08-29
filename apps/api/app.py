@@ -131,6 +131,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 也确保摄取、检索和删除流程使用的是同一组 Repository、Storage 与 VectorStore 实例。
     app.state.container = Container(
         engine=engine,
+        max_upload_bytes=settings.max_upload_bytes,
         repository=repository,
         ingestion=IngestionService(
             repository=repository,

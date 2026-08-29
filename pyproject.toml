@@ -38,6 +38,7 @@ packages = ["src/ultimate_rag"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["apps"]
 asyncio_mode = "auto"
 
 [tool.ruff]

@@ -21,6 +21,7 @@ class Container:
     """持有 API 生命周期内共享的引擎、Repository 和应用服务。"""
 
     engine: AsyncEngine
+    max_upload_bytes: int
     repository: Repository
     ingestion: IngestionService
     retrieval: RetrievalService
