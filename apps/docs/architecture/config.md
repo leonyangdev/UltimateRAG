@@ -55,6 +55,8 @@ settings = get_settings()   # 进程内单例，只解析一次
 | `VISION_MODEL` | `qwen3-vl-flash` | 图片语义理解模型 |
 | `OCR_MAX_IMAGE_BYTES` | `6MB` | OCR 单图上限（百炼 Base64 限制约 7MB） |
 | `VISION_MAX_IMAGE_BYTES` | `6MB` | 视觉单图上限 |
+| `OCR_MAX_OUTPUT_TOKENS` | `4096` | OCR 有界输出，防止伪表格无限膨胀 |
+| `VISION_MAX_OUTPUT_TOKENS` | `1536` | 视觉语义描述输出上限 |
 | `MODEL_TIMEOUT_SECONDS` | `60` | 模型请求超时 |
 
 ### 切块与检索
@@ -82,7 +84,9 @@ settings = get_settings()   # 进程内单例，只解析一次
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `PDF_NATIVE_TEXT_THRESHOLD` | `20` | 文字量低于此值判定为扫描页 |
+| `PDF_NATIVE_TEXT_THRESHOLD` | `20` | 扫描候选页原生文字阈值 |
+| `PDF_SCAN_IMAGE_COVERAGE_THRESHOLD` | `0.65` | 扫描候选页最大栅格图覆盖率阈值 |
+| `PDF_SCAN_VISION_TEXT_THRESHOLD` | `300` | OCR 低于该字符数时补视觉理解，0 为关闭 |
 | `PDF_RENDER_SCALE` | `2.0` | 扫描页渲染缩放 |
 | `PDF_VISION_CONCURRENCY` | `2` | 图片理解并发 |
 | `PDF_MAX_PICTURES` | `20` | 单 PDF 最大附图数 |

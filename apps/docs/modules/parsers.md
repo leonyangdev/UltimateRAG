@@ -12,6 +12,7 @@ Parser 负责把**各种原始格式**转换成**统一的领域模型**（`Pars
 parsers/
 ├── registry.py        # ParserRegistry：按来源选择 Parser
 ├── _shared.py         # 公共工具（扩展名/MIME 判断、安全校验、表格转 Markdown）
+├── _model_output.py   # OCR/Vision Markdown、伪表格和装饰图清理
 ├── markdown.py        # MarkdownParser      （.md / .markdown）
 ├── pdf.py             # PDFParser           （.pdf，Docling + PDFium + 百炼）
 ├── html.py            # HtmlParser          （.html / .htm）
@@ -117,17 +118,18 @@ heading_path.append(content)
 ### ImageOCRParser
 
 - 用 Pillow 验证**真实图片格式**（扩展名伪装会失败）
-- 交给 `OCRClient`（百炼 OCR）识别文字
-- 输出为 `IMAGE` 类型 Block，content 是可向量化的识别文本
-- 无文字则失败，不产生空 Chunk
+- 并发调用 `OCRClient` 保留精确文字，并调用 `VisionClient` 提取箭头、嵌套、流程和图表关系
+- 以 `OCR 文本 / 视觉结构` 标签融合，实际路径写入 `extraction_methods`
+- 清除 Markdown 包装、空表格行和重复正文的伪表格；装饰图可显式跳过
+- 两条路径都无有效内容才失败，不产生空 Chunk
 
 ### PDFParser —— 最复杂
 
 PDF 采用「按页判定」双路径（详见 [V2 能力与限制](/guide/v2-capabilities#_2-pdf-的特殊处理-双路径)）：
 
 ```text
-PDFium 逐页探测
-  ├─ 低文字量页 → 渲染 JPEG → 百炼 OCR → IMAGE Block
+PDFium 逐页探测文字量与栅格覆盖
+  ├─ 低文字量 + 大图覆盖 → 渲染 JPEG → 百炼 OCR；稀疏结果补 Vision
   └─ 文字型页 → Docling Layout + TableFormer
         ├─ 分栏阅读顺序、标题层级、正文
         ├─ 表格 → Markdown TABLE
@@ -139,7 +141,7 @@ PDFium 逐页探测
 
 - **Docling 模型延迟加载**：只在 Worker 真正处理文字型 PDF 时导入（API 上传进程不加载 Torch）
 - 本地 Docling 关闭自身 OCR，避免两个 OCR 来源冲突
-- 扫描页 OCR 有界并发（`pdf_vision_concurrency`，默认 2）
+- 扫描判定要求低文字与大图覆盖同时成立；扫描 OCR 稀疏时补 Vision，调用有界并发
 - 重复页眉页脚过滤；BBox 统一为左上角原点
 - 单张附图理解失败 → 降级 OCR → 再失败跳过（不影响正文）；整页扫描 OCR 失败 → 任务失败可重试
 
@@ -165,7 +167,7 @@ PDFium 逐页探测
 | Excel | `ExcelParser` | openpyxl | Sheet + 区域 |
 | PPT | `PowerPointParser` | python-pptx | 幻灯片序号 |
 | HTML | `HtmlParser` | BeautifulSoup | 标题路径 |
-| 图片 | `ImageOCRParser` | Pillow + 百炼 OCR | 文档级 |
+| 图片 | `ImageOCRParser` | Pillow + 百炼 OCR/Vision | 文档级 |
 
 ## 下一步
 

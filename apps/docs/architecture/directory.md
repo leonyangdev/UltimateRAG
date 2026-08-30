@@ -73,6 +73,7 @@ src/ultimate_rag/
 ├── parsers/                 # 解析器（格式 → 统一模型）
 │   ├── registry.py          #   ParserRegistry：按来源选择 Parser
 │   ├── _shared.py           #   公共校验与工具
+│   ├── _model_output.py     #   OCR/Vision Markdown 与伪表格清理
 │   ├── markdown.py          #   MarkdownParser
 │   ├── pdf.py               #   PDFParser（Docling + PDFium + 百炼）
 │   ├── html.py              #   HtmlParser

@@ -32,6 +32,7 @@ export interface DocumentItem {
   status: string;
   error_message: string | null;
   parser_name: string | null;
+  parser_version: string | null;
   created_at: string;
 }
 

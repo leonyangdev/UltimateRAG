@@ -93,13 +93,10 @@ def _heading_prefix(self, heading_path):
 
 ### 表格按行切分，重复表头
 
-```python
-def _split_table(self, table, budget):
-    header = "\n".join(lines[:2])   # 表头 + 分隔行
-    ...
-    # 贪心装箱，每个 Chunk 都带表头，保证表格语义完整
-    pieces.append("\n".join([header, *current_rows]))
-```
+- 先定位 Markdown 分隔行，而不是假设表格一定从第一行开始；Docling 放在表格前的题注会保留
+- 首列为空的 EN-DE/EN-FR 等跨列二级表头也进入重复前缀
+- 按行贪心装箱，每个续块在预算允许时重复「题注 + 主表头 + 二级表头」
+- 极宽单行只有在连同表头会超限时才省略表头，Chunk 始终不超过硬 Token 预算
 
 ### 自然单元装入 + 尾部 overlap
 
@@ -133,7 +130,7 @@ StructureAwareMarkdownChunker = StructureAwareChunker
 | 内容类型 | 切分策略 | 每个 Chunk |
 |---|---|---|
 | 正文 | 段落 → 句子 → Token 窗口 | 带标题前缀 |
-| 表格 | 按行装箱 | 重复表头 |
+| 表格 | 按行装箱 | 重复题注与多级表头；极宽行按预算降级 |
 | 代码 | 按行装箱 | 独立代码围栏 |
 | 图片 | 独立 | 语义描述文本 |
 

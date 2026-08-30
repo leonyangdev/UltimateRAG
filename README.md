@@ -11,12 +11,13 @@
 1. 创建知识库
 2. 上传 Markdown、PDF、DOCX、XLSX、PPTX、HTML 或常见图片
 3. 上传在文件与任务可靠落库后立即返回，由独立 Worker 后台处理
-4. 使用本地 Docling 恢复 PDF 分栏顺序、标题、表格、图片区域和 BBox，扫描页使用百炼 OCR
-5. 前端自动刷新文档从 `PENDING` 到 `READY/FAILED` 的状态和实际 Parser
-6. 使用 Milvus Dense Retrieval 独立调试召回内容和分数
-7. 使用阿里云百炼模型进行知识库问答
-8. 查看答案引用的章节、PDF 页码/BBox、Excel 区域或 PPT 幻灯片
-9. 删除文档或知识库，并同步清理三类存储
+4. 使用本地 Docling 恢复 PDF 分栏顺序、标题、表格、图片区域和 BBox，扫描页融合百炼 OCR/Vision
+5. 对独立图片融合精确文字与箭头、流程、嵌套关系，并清理 OCR 伪表格噪声
+6. 前端自动刷新文档从 `PENDING` 到 `READY/FAILED` 的状态和实际 Parser
+7. 使用 Milvus Dense Retrieval 独立调试召回内容和分数
+8. 使用阿里云百炼模型进行知识库问答
+9. 查看答案引用的章节、PDF 页码/BBox、Excel 区域或 PPT 幻灯片
+10. 删除文档或知识库，并同步清理三类存储
 
 V2 明确不包含混合检索、Reranker、Agent、ACL、DLQ 控制台和 RAGOps；这些属于后续版本。
 
@@ -36,7 +37,7 @@ Background Worker → Parse → Chunk → Embed → Index
     │
     ▼
 Domain Ports
-    ├── DocumentParser   → Markdown / PDF / Office / HTML / Image OCR
+    ├── DocumentParser   → Markdown / PDF / Office / HTML / Image Intelligence
     ├── OCRClient        → BailianOCRClient（扫描页/图片文字）
     ├── VisionClient     → BailianVisionClient（图表/架构图语义）
     ├── Chunker          → StructureAwareChunker（结构 + Token + 类型）
@@ -72,7 +73,7 @@ Domain Ports
   - Embedding 默认 `text-embedding-v4`，1024 维
   - LLM 默认 `qwen-plus`
   - OCR 默认 `qwen3.5-ocr`
-  - PDF 图片理解默认 `qwen3-vl-flash`
+  - PDF/独立图片理解默认 `qwen3-vl-flash`
 - Next.js 16、React 19、TypeScript、Tailwind CSS 4、shadcn/ui、AI SDK
 - uv、pytest、Ruff、Mypy
 
@@ -92,8 +93,10 @@ EMBEDDING_DIMENSION=1024
 LLM_MODEL=qwen-plus
 OCR_MODEL=qwen3.5-ocr
 OCR_MAX_IMAGE_BYTES=6291456
+OCR_MAX_OUTPUT_TOKENS=4096
 VISION_MODEL=qwen3-vl-flash
 VISION_MAX_IMAGE_BYTES=6291456
+VISION_MAX_OUTPUT_TOKENS=1536
 
 # 可选；留空时浏览器自动访问当前页面主机的 8000 端口
 NEXT_PUBLIC_API_URL=
@@ -120,13 +123,23 @@ docker compose logs -f worker
 `docling_cache` Volume。希望在离线验收前预热模型时可执行：
 
 ```bash
-docker compose run --rm worker docling-tools models download
+docker compose run --rm worker docling-tools models download layout tableformer
 ```
 
-扫描 PDF 不依赖 Docling OCR，而是按页调用 `.env` 中的百炼 OCR；文字型 PDF 的版面与表格推理
-在 Worker 本地完成。默认锁文件从 PyTorch 官方 CPU Index 安装 `torch/torchvision`，避免本地 Docker
+扫描 PDF 不依赖 Docling OCR，而是按页调用 `.env` 中的百炼 OCR；低文字页还必须存在覆盖大部分
+页面的栅格图才判为扫描页，避免图文页错误退化。稀疏 OCR 页会补充 Vision 关系理解。文字型 PDF
+的版面与表格推理在 Worker 本地完成。默认锁文件从 PyTorch 官方 CPU Index 安装 `torch/torchvision`，避免本地 Docker
 镜像误装数 GB CUDA 依赖。GPU 部署应维护独立的 CUDA 镜像/锁定策略，而不是直接修改运行时设备名。
 生产环境应为 Worker 单独配置 CPU/内存与副本数。
+
+仓库 `data/` 中的真实图片与论文 PDF 可执行专项验收（会真实产生少量百炼用量）：
+
+```bash
+uv run python scripts/smoke_v2_data.py --api-url http://localhost:8000
+```
+
+脚本断言上传立即返回、后台最终 `READY`、图片关系可召回、PDF Table 2 续块带完整多级表头，
+并校验页码/BBox；默认只删除脚本自己创建的临时知识库。
 
 ### 3. 打开服务
 

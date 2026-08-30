@@ -50,6 +50,18 @@ class StubVisionClient:
         return "架构图显示 API 指向 Worker。"
 
 
+class StubStandaloneVisionClient:
+    """返回独立图片中的箭头关系，覆盖 OCR 无法表达的视觉语义。"""
+
+    async def describe(self, image: bytes, mime_type: str, caption: str = "") -> str:
+        """验证独立 PNG 使用真实 MIME 且没有伪造题注。"""
+
+        assert image
+        assert mime_type == "image/png"
+        assert caption == ""
+        return "Encoder 通过箭头连接 Decoder。"
+
+
 class StubLayoutAnalyzer:
     """以确定性元素替代重量 Docling 模型，单测只验证 Parser 编排和映射。"""
 
@@ -231,6 +243,24 @@ async def test_image_parser_validates_format_before_ocr() -> None:
 
 
 @pytest.mark.asyncio
+async def test_image_parser_fuses_ocr_text_and_visual_relationships() -> None:
+    """示意图应同时保留精确标签与箭头关系，不能只索引零散 OCR 文字。"""
+
+    buffer = BytesIO()
+    Image.new("RGB", (80, 40), "white").save(buffer, format="PNG")
+
+    parsed = await ImageOCRParser(
+        StubOCRClient("Encoder\nDecoder"),
+        StubStandaloneVisionClient(),
+    ).parse(_source("diagram.png", "image/png", buffer.getvalue()))
+
+    assert "## OCR 文本" in parsed.blocks[0].content
+    assert "## 视觉结构" in parsed.blocks[0].content
+    assert "Encoder 通过箭头连接 Decoder" in parsed.blocks[0].content
+    assert parsed.blocks[0].metadata["extraction"] == "bailian_ocr+bailian_vision"
+
+
+@pytest.mark.asyncio
 async def test_pdf_parser_ocr_scan_page_and_keeps_page_number() -> None:
     """无文本扫描 PDF 应渲染页面执行 OCR，并把一基页码带到 Block。"""
 
@@ -280,6 +310,33 @@ async def test_pdf_parser_uses_native_text_without_ocr() -> None:
     assert "UltimateRAG native PDF text" in parsed.blocks[0].content
     assert parsed.blocks[0].locator is not None and parsed.blocks[0].locator.page == 1
     assert parsed.metadata["ocr_page_count"] == 0
+    assert ocr.mime_types == []
+    assert layout.calls == [frozenset()]
+
+
+@pytest.mark.asyncio
+async def test_pdf_parser_does_not_treat_short_vector_page_as_scan() -> None:
+    """原生文字少但没有整页栅格图时仍应走 Layout，避免图文页退化为纯 OCR。"""
+
+    ocr = StubOCRClient()
+    layout = StubLayoutAnalyzer(
+        [
+            _LayoutElement(
+                0,
+                1,
+                BlockType.TEXT,
+                "Short vector page",
+                SourceLocator(page=1, bbox=(10, 20, 180, 50)),
+            )
+        ]
+    )
+
+    parsed = await PDFParser(ocr, native_text_threshold=20, layout_analyzer=layout).parse(
+        _source("short.pdf", "application/pdf", _native_text_pdf("Short"))
+    )
+
+    assert parsed.blocks[0].content == "Short vector page"
+    assert parsed.metadata["scan_page_count"] == 0
     assert ocr.mime_types == []
     assert layout.calls == [frozenset()]
 
@@ -338,5 +395,8 @@ async def test_pdf_parser_preserves_layout_table_picture_and_bbox() -> None:
     ]
     assert parsed.blocks[1].locator is not None
     assert parsed.blocks[1].locator.bbox == (10, 50, 300, 150)
-    assert parsed.blocks[2].content == "架构图显示 API 指向 Worker。"
+    assert parsed.blocks[2].content == (
+        "图片题注：系统架构\n\n架构图显示 API 指向 Worker。"
+    )
+    assert parsed.blocks[2].metadata["extraction"] == "bailian_vision"
     assert parsed.metadata["table_count"] == 1

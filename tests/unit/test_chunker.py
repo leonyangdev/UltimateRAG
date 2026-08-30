@@ -87,6 +87,36 @@ async def test_chunker_repeats_table_header_when_splitting_rows() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chunker_repeats_docling_caption_and_multilevel_table_header() -> None:
+    """Docling 题注和跨列表头都应出现在续块中，不能退化为无列语义 Token 窗口。"""
+
+    rows = "\n".join(f"| Model {index} | {20 + index}.0 | {30 + index}.0 |" for index in range(20))
+    table = (
+        "Table 2: Translation quality.\n"
+        "| Model | BLEU | BLEU |\n"
+        "| --- | --- | --- |\n"
+        "|  | EN-DE | EN-FR |\n"
+        f"{rows}"
+    )
+    parsed = ParsedDocument(
+        document_id="table-caption",
+        blocks=(Block("table", BlockType.TABLE, table, SourceLocator(page=8)),),
+    )
+
+    chunks = await StructureAwareMarkdownChunker(96, 8).split(parsed, "kb-1")
+
+    expected_prefix = (
+        "Table 2: Translation quality.\n"
+        "| Model | BLEU | BLEU |\n"
+        "| --- | --- | --- |\n"
+        "|  | EN-DE | EN-FR |"
+    )
+    assert len(chunks) > 1
+    assert all(chunk.content.startswith(expected_prefix) for chunk in chunks)
+    assert all(chunk.token_count <= 96 for chunk in chunks)
+
+
+@pytest.mark.asyncio
 async def test_chunker_merges_bboxes_without_crossing_page_boundary() -> None:
     """同页相邻正文可合并并扩大 BBox，不同页仍必须生成不同 Citation。"""
 

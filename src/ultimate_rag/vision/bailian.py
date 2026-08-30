@@ -15,11 +15,14 @@ from openai.types.chat import ChatCompletionMessageParam
 class BailianVisionClient:
     """使用百炼 Qwen-VL 提取图片中的文字、结构和非文本语义。"""
 
-    _PROMPT = """请忠实分析这张来自企业文档的图片，并输出适合知识库检索的 Markdown：
+    _PROMPT = """请忠实分析这张来自企业文档的图片，并输出简洁、适合知识库检索的 Markdown：
 1. 提取全部重要可见文字；
 2. 若为图表，说明坐标、图例、关键数值和明确可见的趋势；
 3. 若为流程图或架构图，按箭头方向说明节点与关系；
 4. 若为普通示意图，简洁描述与文档主题有关的可见信息。
+只能记录文字、箭头、连线、包含/空间关系等图中可以直接确认的信息。禁止依据领域常识补充公式、
+定义、成因、训练方式或节点内部实现。控制在 800 字以内，不要用 ```markdown 包裹结果。
+若图片只有装饰、纯色块、边框或其他没有独立检索价值的内容，请只输出 NO_RETRIEVABLE_CONTENT。
 不要猜测不可见数据，不要添加图片中没有的结论。只输出分析结果。"""
 
     def __init__(
@@ -29,6 +32,7 @@ class BailianVisionClient:
         base_url: str,
         model: str,
         max_image_bytes: int,
+        max_output_tokens: int,
         timeout: float,
     ) -> None:
         """创建可复用 OpenAI-Compatible 客户端并固定模型边界。"""
@@ -36,6 +40,7 @@ class BailianVisionClient:
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
         self._model = model
         self._max_image_bytes = max_image_bytes
+        self._max_output_tokens = max_output_tokens
 
     async def describe(self, image: bytes, mime_type: str, caption: str = "") -> str:
         """返回图片的忠实 Markdown 表达，空响应或非法图片会显式失败。"""
@@ -70,6 +75,7 @@ class BailianVisionClient:
             model=self._model,
             messages=messages,
             temperature=0,
+            max_tokens=self._max_output_tokens,
         )
         content = response.choices[0].message.content
         if not content or not content.strip():

@@ -86,6 +86,7 @@ def create_processing_runtime(settings: Settings) -> ProcessingRuntime:
         base_url=settings.dashscope_base_url,
         model=settings.ocr_model,
         max_image_bytes=settings.ocr_max_image_bytes,
+        max_output_tokens=settings.ocr_max_output_tokens,
         timeout=settings.model_timeout_seconds,
     )
     vision = BailianVisionClient(
@@ -93,6 +94,7 @@ def create_processing_runtime(settings: Settings) -> ProcessingRuntime:
         base_url=settings.dashscope_base_url,
         model=settings.vision_model,
         max_image_bytes=settings.vision_max_image_bytes,
+        max_output_tokens=settings.vision_max_output_tokens,
         timeout=settings.model_timeout_seconds,
     )
     registry = ParserRegistry(
@@ -106,6 +108,8 @@ def create_processing_runtime(settings: Settings) -> ProcessingRuntime:
                 ocr,
                 vision,
                 native_text_threshold=settings.pdf_native_text_threshold,
+                scan_image_coverage_threshold=settings.pdf_scan_image_coverage_threshold,
+                scan_vision_text_threshold=settings.pdf_scan_vision_text_threshold,
                 render_scale=settings.pdf_render_scale,
                 vision_concurrency=settings.pdf_vision_concurrency,
                 docling_device=settings.docling_device,
@@ -117,7 +121,9 @@ def create_processing_runtime(settings: Settings) -> ProcessingRuntime:
                 max_pictures=settings.pdf_max_pictures,
                 min_picture_pixels=settings.pdf_min_picture_pixels,
             ),
-            ImageOCRParser(ocr),
+            # 独立图片与 PDF 内嵌图片使用同一组可替换模型边界：OCR 保留精确文字，
+            # Vision 补充箭头、包含关系和图表趋势，避免示意图只剩零散标签。
+            ImageOCRParser(ocr, vision),
         ]
     )
     chunker = StructureAwareChunker(

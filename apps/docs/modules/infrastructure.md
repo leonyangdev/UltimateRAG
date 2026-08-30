@@ -87,7 +87,7 @@ def create_processing_runtime(settings) -> ProcessingRuntime:
     vision = BailianVisionClient(...)
 
     # Parser Registry：顺序即优先级（Markdown → Word → Excel → PPT → HTML → PDF → 图片）
-    registry = ParserRegistry([MarkdownParser(), WordParser(), ..., ImageOCRParser(ocr)])
+    registry = ParserRegistry([MarkdownParser(), WordParser(), ..., ImageOCRParser(ocr, vision)])
 
     chunker = StructureAwareChunker(...)
     ingestion = IngestionService(...)

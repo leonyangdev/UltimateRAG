@@ -54,7 +54,7 @@ V6.0  Intelligent RAG        智能 RAG：Agent、Tool Calling、工作流
 1. 创建知识库
 2. 上传 Markdown、PDF、DOCX、XLSX、PPTX、HTML 或常见图片
 3. 上传在「文件与任务可靠落库」后立即返回（HTTP 202），由独立 Worker 后台处理
-4. 文字型 PDF 用本地 Docling 恢复分栏顺序、标题、表格、图片区域和 BBox；扫描页用百炼 OCR
+4. 文字型 PDF 用本地 Docling 恢复分栏、表格、图片和 BBox；扫描页及独立图片融合百炼 OCR/Vision
 5. 前端自动刷新文档从 `PENDING` 到 `READY/FAILED` 的状态和实际使用的 Parser
 6. 用 Milvus Dense Retrieval 独立调试召回内容和分数（不依赖 LLM）
 7. 用阿里云百炼模型进行知识库问答

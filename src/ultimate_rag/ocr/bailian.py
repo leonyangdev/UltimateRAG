@@ -35,7 +35,8 @@ class BailianOCRClient:
 
     _PROMPT = (
         "请按自然阅读顺序提取图片中的全部可见文字。保留标题、段落、列表和表格的行列关系，"
-        "表格使用 Markdown 表格表示。只输出识别结果，不要解释、总结或编造不可见内容。"
+        "只有原图明确存在行列结构时才使用 Markdown 表格，禁止输出空行、空单元格组成的伪表格。"
+        "示意图只提取文字，不要猜测图形关系。只输出识别结果，不要解释、总结或编造不可见内容。"
     )
 
     def __init__(
@@ -45,6 +46,7 @@ class BailianOCRClient:
         base_url: str,
         model: str,
         max_image_bytes: int,
+        max_output_tokens: int,
         timeout: float,
     ) -> None:
         """创建可复用客户端并固定 OCR 模型与单图字节上限。"""
@@ -52,6 +54,7 @@ class BailianOCRClient:
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
         self._model = model
         self._max_image_bytes = max_image_bytes
+        self._max_output_tokens = max_output_tokens
 
     async def extract_text(self, image: bytes, mime_type: str) -> str:
         """识别图片并拒绝空内容或超过百炼 Base64 接口限制的输入。
@@ -95,6 +98,8 @@ class BailianOCRClient:
             model=self._model,
             messages=messages,
             temperature=0,
+            # 有界输出可防止模型把图形边框误识别为数千行空表格并污染后续 Chunk。
+            max_tokens=self._max_output_tokens,
         )
         content = response.choices[0].message.content
         if not content or not content.strip():
@@ -137,6 +142,7 @@ def main() -> None:
         base_url=settings.dashscope_base_url,
         model=settings.ocr_model,
         max_image_bytes=settings.ocr_max_image_bytes,
+        max_output_tokens=settings.ocr_max_output_tokens,
         timeout=settings.model_timeout_seconds,
     )
 

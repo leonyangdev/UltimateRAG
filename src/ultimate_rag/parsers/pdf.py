@@ -30,6 +30,7 @@ from ultimate_rag.domain.models import (
     SourceLocator,
 )
 from ultimate_rag.domain.ports import OCRClient, VisionClient
+from ultimate_rag.parsers._model_output import combine_ocr_and_vision, normalize_model_markdown
 from ultimate_rag.parsers._shared import stable_block, supports_source
 
 if TYPE_CHECKING:
@@ -305,7 +306,7 @@ class PDFParser:
     """组合本地版面分析、百炼扫描 OCR 与嵌入图片理解。"""
 
     name = "pdf-docling"
-    version = "2.1"
+    version = "2.2"
     _EXTENSIONS = frozenset({".pdf"})
     _MIME_TYPES = frozenset({"application/pdf"})
     _MAX_PAGES = 500
@@ -316,6 +317,8 @@ class PDFParser:
         vision_client: VisionClient | None = None,
         *,
         native_text_threshold: int = 20,
+        scan_image_coverage_threshold: float = 0.65,
+        scan_vision_text_threshold: int = 300,
         render_scale: float = 2.0,
         vision_concurrency: int = 2,
         layout_analyzer: _PDFLayoutAnalyzer | None = None,
@@ -332,6 +335,10 @@ class PDFParser:
 
         if native_text_threshold < 0:
             raise ValueError("PDF native text threshold cannot be negative")
+        if not 0.1 <= scan_image_coverage_threshold <= 1.0:
+            raise ValueError("PDF scan image coverage threshold must be between 0.1 and 1.0")
+        if scan_vision_text_threshold < 0:
+            raise ValueError("PDF scan vision text threshold cannot be negative")
         if not 0.5 <= render_scale <= 3.0:
             raise ValueError("PDF render scale must be between 0.5 and 3.0")
         if vision_concurrency < 1:
@@ -339,6 +346,8 @@ class PDFParser:
         self._ocr_client = ocr_client
         self._vision_client = vision_client
         self._native_text_threshold = native_text_threshold
+        self._scan_image_coverage_threshold = scan_image_coverage_threshold
+        self._scan_vision_text_threshold = scan_vision_text_threshold
         self._render_scale = render_scale
         self._vision_concurrency = vision_concurrency
         self._layout_analyzer = layout_analyzer or DoclingPDFLayoutAnalyzer(
@@ -376,15 +385,15 @@ class PDFParser:
         for element in resolved_layout:
             elements_by_page.setdefault(element.page, []).append(element)
 
-        ocr_results = await self._ocr_scanned_pages(pages)
+        scan_results = await self._ocr_scanned_pages(pages)
         blocks: list[Block] = []
         fallback_page_count = 0
         for page in pages:
             page_elements = sorted(
                 elements_by_page.get(page.number, []), key=lambda item: item.order
             )
-            if page.number in ocr_results:
-                text = ocr_results[page.number].strip()
+            if page.number in scan_results:
+                text, extraction = scan_results[page.number]
                 if text:
                     page_elements = [
                         _LayoutElement(
@@ -393,7 +402,7 @@ class PDFParser:
                             BlockType.IMAGE,
                             text,
                             SourceLocator(page=page.number),
-                            {"extraction": "bailian_page_ocr"},
+                            {"extraction": extraction},
                         )
                     ]
             elif not page_elements and page.native_text.strip():
@@ -435,7 +444,13 @@ class PDFParser:
                 "parser": self.name,
                 "parser_version": self.version,
                 "page_count": len(pages),
-                "ocr_page_count": len(ocr_results),
+                "scan_page_count": len(scanned_pages),
+                "ocr_page_count": sum(
+                    "ocr" in extraction for _text, extraction in scan_results.values()
+                ),
+                "scan_vision_page_count": sum(
+                    "vision" in extraction for _text, extraction in scan_results.values()
+                ),
                 "table_count": sum(block.type == BlockType.TABLE for block in blocks),
                 "image_count": sum(block.type == BlockType.IMAGE for block in blocks),
                 "fallback_page_count": fallback_page_count,
@@ -456,13 +471,17 @@ class PDFParser:
                 return element
             async with semaphore:
                 content = ""
+                extraction = ""
                 if self._vision_client is not None:
                     try:
-                        content = await self._vision_client.describe(
-                            element.image,
-                            "image/jpeg",
-                            element.caption,
+                        content = normalize_model_markdown(
+                            await self._vision_client.describe(
+                                element.image,
+                                "image/jpeg",
+                                element.caption,
+                            )
                         )
+                        extraction = "bailian_vision"
                     except Exception:
                         # 单个附图理解失败不应使正文完全不可用；继续尝试 OCR，完整异常只写日志。
                         logger.warning(
@@ -472,49 +491,102 @@ class PDFParser:
                         )
                 if not content:
                     try:
-                        content = await self._ocr_client.extract_text(
-                            element.image,
-                            "image/jpeg",
+                        content = normalize_model_markdown(
+                            await self._ocr_client.extract_text(
+                                element.image,
+                                "image/jpeg",
+                            )
                         )
+                        extraction = "bailian_ocr_fallback"
                     except Exception:
                         logger.warning(
                             "PDF embedded-image OCR fallback failed",
                             extra={"page": element.page},
                             exc_info=True,
                         )
-                        return None
+                        content = ""
+                if element.caption:
+                    # 题注来自 Docling 的相邻结构，是图片最稳定的检索锚点；即使模型降级也应保留。
+                    content = f"图片题注：{element.caption}\n\n{content}".strip()
+                if not content:
+                    return None
                 return _LayoutElement(
                     element.order,
                     element.page,
                     element.block_type,
                     content,
                     element.locator,
-                    {**element.metadata, "extraction": "bailian_vision"},
+                    {
+                        **element.metadata,
+                        "extraction": extraction or "docling_caption",
+                        "caption": element.caption,
+                    },
                     caption=element.caption,
                 )
 
         values = await asyncio.gather(*(resolve(element) for element in elements))
         return [value for value in values if value is not None]
 
-    async def _ocr_scanned_pages(self, pages: list[_PDFPage]) -> dict[int, str]:
-        """有界并发 OCR 扫描页；非法渲染不可重试，服务故障交给 Worker 重试。"""
+    async def _ocr_scanned_pages(self, pages: list[_PDFPage]) -> dict[int, tuple[str, str]]:
+        """有界并发解析扫描页；稀疏 OCR 页面追加 Vision 以保留图形关系。"""
 
         semaphore = asyncio.Semaphore(self._vision_concurrency)
 
-        async def recognize(page: _PDFPage) -> tuple[int, str] | None:
+        async def recognize(page: _PDFPage) -> tuple[int, str, str] | None:
             if page.rendered_image is None:
                 return None
             async with semaphore:
+                ocr_text = ""
+                ocr_error: Exception | None = None
                 try:
-                    text = await self._ocr_client.extract_text(page.rendered_image, "image/jpeg")
+                    ocr_text = normalize_model_markdown(
+                        await self._ocr_client.extract_text(page.rendered_image, "image/jpeg")
+                    )
                 except ValueError as exc:
                     raise InvalidDocumentError(
                         f"PDF 第 {page.number} 页 OCR 输入无效：{exc}"
                     ) from exc
-                return page.number, text
+                except Exception as exc:
+                    ocr_error = exc
+                    logger.warning(
+                        "PDF scanned-page OCR failed; trying vision",
+                        extra={"page": page.number},
+                        exc_info=True,
+                    )
+
+                vision_text = ""
+                compact_ocr_length = len("".join(ocr_text.split()))
+                should_use_vision = (
+                    self._vision_client is not None
+                    and compact_ocr_length < self._scan_vision_text_threshold
+                )
+                if should_use_vision and self._vision_client is not None:
+                    try:
+                        vision_text = normalize_model_markdown(
+                            await self._vision_client.describe(page.rendered_image, "image/jpeg")
+                        )
+                    except Exception:
+                        logger.warning(
+                            "PDF scanned-page vision analysis failed",
+                            extra={"page": page.number},
+                            exc_info=True,
+                        )
+
+                content = combine_ocr_and_vision(ocr_text, vision_text)
+                if not content and ocr_error is not None:
+                    raise RuntimeError(f"PDF 第 {page.number} 页扫描解析失败") from ocr_error
+                extraction = "+".join(
+                    method
+                    for method, value in (
+                        ("bailian_page_ocr", ocr_text),
+                        ("bailian_page_vision", vision_text),
+                    )
+                    if value
+                )
+                return page.number, content, extraction
 
         values = await asyncio.gather(*(recognize(page) for page in pages))
-        return {value[0]: value[1] for value in values if value is not None}
+        return {value[0]: (value[1], value[2]) for value in values if value is not None}
 
     def _inspect_pages(self, content: bytes) -> list[_PDFPage]:
         """用 PDFium 验证 PDF、识别低文本页，并只渲染需要百炼 OCR 的页面。"""
@@ -534,7 +606,12 @@ class PDFParser:
                 text_page.close()
                 rendered = None
                 visible_character_count = len("".join(native_text.split()))
-                if visible_character_count < self._native_text_threshold:
+                raster_coverage = self._largest_raster_coverage(page)
+                is_scanned_page = (
+                    visible_character_count < self._native_text_threshold
+                    and raster_coverage >= self._scan_image_coverage_threshold
+                )
+                if is_scanned_page:
                     bitmap = page.render(scale=self._render_scale)
                     image = bitmap.to_pil().convert("RGB")
                     buffer = BytesIO()
@@ -549,3 +626,22 @@ class PDFParser:
             raise
         except Exception as exc:
             raise InvalidDocumentError("PDF 文件损坏、加密或无法解析") from exc
+
+    @staticmethod
+    def _largest_raster_coverage(page: object) -> float:
+        """估算最大栅格图占页比例，用于区分扫描页与含少量文字的图文页。
+
+        仅用“原生文字少于 N 个字符”会把整页架构图或少量题注页面错误路由到纯 OCR。扫描件通常
+        包含一张覆盖大部分页面的栅格图，因此同时要求最大图片覆盖率达到阈值更可靠。
+        """
+
+        width, height = page.get_size()  # type: ignore[attr-defined]
+        page_area = max(float(width) * float(height), 1.0)
+        largest = 0.0
+        for image in page.get_objects(  # type: ignore[attr-defined]
+            filter=[pdfium.raw.FPDF_PAGEOBJ_IMAGE]
+        ):
+            left, bottom, right, top = image.get_pos()
+            area = abs(float(right) - float(left)) * abs(float(top) - float(bottom))
+            largest = max(largest, min(area / page_area, 1.0))
+        return largest

@@ -34,6 +34,7 @@ async def test_ocr_uses_base64_data_url_and_strips_response() -> None:
         base_url="https://example.test/v1",
         model="qwen-vl-ocr-latest",
         max_image_bytes=100,
+        max_output_tokens=512,
         timeout=1,
     )
     api = FakeCompletionsAPI()
@@ -48,6 +49,7 @@ async def test_ocr_uses_base64_data_url_and_strips_response() -> None:
     content = cast(list[dict[str, object]], messages[0]["content"])
     image_url = cast(dict[str, str], content[0]["image_url"])
     assert image_url["url"].startswith("data:image/png;base64,")
+    assert api.requests[0]["max_tokens"] == 512
 
 
 @pytest.mark.asyncio
@@ -59,6 +61,7 @@ async def test_ocr_rejects_image_over_configured_limit() -> None:
         base_url="https://example.test/v1",
         model="qwen-vl-ocr-latest",
         max_image_bytes=2,
+        max_output_tokens=512,
         timeout=1,
     )
 

@@ -101,9 +101,9 @@ return DocumentResponse.from_domain(value)          # 202 + PENDING
 | `registry.py` | 如何按 `supports()` 顺序选 Parser |
 | `_shared.py` | 输入安全（ZIP Bomb 防护、扩展名/MIME 校验）、表格转 Markdown |
 | `markdown.py` | 标题路径如何维护：`heading_path = heading_path[:level-1]; append(content)` |
-| `pdf.py` | 最复杂：PDFium 逐页探测 + Docling 布局 + 扫描页 OCR 双路径 |
+| `pdf.py` | 最复杂：PDFium 文字/栅格探测 + Docling 布局 + 扫描页 OCR/Vision |
 | `office.py` | Word/Excel/PPT 各自的结构映射 |
-| `image.py` | Pillow 验证真实格式 → 百炼 OCR |
+| `image.py` | Pillow 验证 → 百炼 OCR/Vision 融合；模型噪声由 `_model_output.py` 清理 |
 
 > 读懂一个 Parser（推荐 Markdown），就懂了全部：都是「原始格式 → Block[]」的映射。
 

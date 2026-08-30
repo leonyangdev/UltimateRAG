@@ -34,6 +34,8 @@ class _Section:
     parts: list[str] = field(default_factory=list)
     block_types: set[BlockType] = field(default_factory=set)
     source_labels: set[str] = field(default_factory=set)
+    extraction_methods: set[str] = field(default_factory=set)
+    layout_engines: set[str] = field(default_factory=set)
 
 
 class StructureAwareChunker:
@@ -81,9 +83,13 @@ class StructureAwareChunker:
                 )
                 block_types = list[JsonValue](sorted(value.value for value in section.block_types))
                 source_labels = list[JsonValue](sorted(section.source_labels))
+                extraction_methods = list[JsonValue](sorted(section.extraction_methods))
+                layout_engines = list[JsonValue](sorted(section.layout_engines))
                 metadata: dict[str, JsonValue] = {
                     "block_types": block_types,
                     "source_labels": source_labels,
+                    "extraction_methods": extraction_methods,
+                    "layout_engines": layout_engines,
                     "split_strategy": strategy,
                     "tokenizer": self._encoding.name,
                 }
@@ -144,6 +150,12 @@ class StructureAwareChunker:
             label = block.metadata.get("layout_label")
             if isinstance(label, str) and label:
                 current.source_labels.add(label)
+            extraction = block.metadata.get("extraction")
+            if isinstance(extraction, str) and extraction:
+                current.extraction_methods.update(extraction.split("+"))
+            layout_engine = block.metadata.get("layout_engine")
+            if isinstance(layout_engine, str) and layout_engine:
+                current.layout_engines.add(layout_engine)
             if locator.bbox is not None:
                 bounding_boxes.append(locator.bbox)
 
@@ -193,37 +205,79 @@ class StructureAwareChunker:
         ]
 
     def _split_table(self, table: str, budget: int) -> list[str]:
-        """按 Markdown 表格行切分，并在每个 Chunk 重复表头与分隔行。"""
+        """按 Markdown 表格行切分，并在预算允许时重复题注、表头和二级表头。
+
+        Docling 会把题注放在 Markdown 表格之前，旧实现因此没有识别到第二行之后的真正表头，
+        最终退化为 Token 窗口并让续块丢失列语义。这里显式定位分隔行；超宽单行无法同时容纳
+        表头时，采用 Docling 官方同类策略：优先保持该行完整并只对该块省略表头。
+        """
 
         lines = [line.strip() for line in table.splitlines() if line.strip()]
-        if len(lines) < 3 or "---" not in lines[1]:
-            return self._hard_token_split(table, budget)
-        header = "\n".join(lines[:2])
-        if self._count_tokens(header) >= budget:
+        separator_index = next(
+            (
+                index
+                for index in range(1, len(lines))
+                if lines[index - 1].startswith("|")
+                and self._is_table_separator(lines[index])
+            ),
+            None,
+        )
+        if separator_index is None:
             return self._hard_token_split(table, budget)
 
-        row_budget = budget - self._count_tokens(header) - 1
-        if row_budget < 8:
-            return self._hard_token_split(table, budget)
-        row_units: list[str] = []
-        for row in lines[2:]:
-            if self._count_tokens(row) <= row_budget:
-                row_units.append(row)
-            else:
-                row_units.extend(self._hard_token_split(row, row_budget, overlap_tokens=0))
+        header_start = separator_index - 1
+        prefix_lines = [*lines[:header_start], lines[header_start], lines[separator_index]]
+        data_start = separator_index + 1
+        if data_start < len(lines) and self._looks_like_secondary_header(lines[data_start]):
+            # Docling 用合并单元格表达多级表头时，第二级常作为首个“数据行”导出且首列为空。
+            prefix_lines.append(lines[data_start])
+            data_start += 1
+        prefix = "\n".join(prefix_lines)
+        rows = lines[data_start:]
+        if not rows:
+            return self._hard_token_split(prefix, budget, overlap_tokens=0)
 
         pieces: list[str] = []
         current_rows: list[str] = []
-        for row in row_units:
-            candidate = "\n".join([header, *current_rows, row])
-            if current_rows and self._count_tokens(candidate) > budget:
-                pieces.append("\n".join([header, *current_rows]))
-                current_rows = [row]
-            else:
-                current_rows.append(row)
+        for row in rows:
+            row_units = (
+                [row]
+                if self._count_tokens(row) <= budget
+                else self._hard_token_split(row, budget, overlap_tokens=0)
+            )
+            for unit in row_units:
+                candidate = "\n".join([prefix, *current_rows, unit])
+                if self._count_tokens(candidate) <= budget:
+                    current_rows.append(unit)
+                    continue
+                if current_rows:
+                    pieces.append("\n".join([prefix, *current_rows]))
+                    current_rows = []
+
+                with_header = f"{prefix}\n{unit}"
+                if self._count_tokens(with_header) <= budget:
+                    current_rows = [unit]
+                else:
+                    # 对极宽表格行，行本身比重复表头更重要；该行为与官方
+                    # omit_header_on_overflow 选项一致，并且仍严格遵守 Token 上限。
+                    pieces.append(unit)
         if current_rows:
-            pieces.append("\n".join([header, *current_rows]))
-        return pieces or [header]
+            pieces.append("\n".join([prefix, *current_rows]))
+        return pieces
+
+    @staticmethod
+    def _is_table_separator(line: str) -> bool:
+        """严格识别 ``| --- | :---: |`` 形式的 Markdown 分隔行。"""
+
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|") if cell.strip()]
+        return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+
+    @staticmethod
+    def _looks_like_secondary_header(line: str) -> bool:
+        """识别 Docling 从跨列表头导出的首列为空二级表头。"""
+
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        return bool(cells) and not cells[0] and any(cells[1:])
 
     def _split_natural(
         self,

@@ -52,8 +52,8 @@ Worker
 PDF 采用双路径：
 
 ```text
-PDFium 安全打开与逐页文字探测
-  ├─ 低文字量页 → 本地渲染 JPEG → 百炼 Qwen OCR
+PDFium 安全打开与逐页文字/栅格覆盖探测
+  ├─ 低文字量 + 整页大图 → 本地渲染 JPEG → 百炼 Qwen OCR；稀疏结果补 Vision
   └─ 文字型页   → 本地 Docling Layout + TableFormer
                         ├─ 标题/正文/列表/代码
                         ├─ 分栏阅读顺序
@@ -63,9 +63,13 @@ PDFium 安全打开与逐页文字探测
 ```
 
 - Docling 关闭自身 OCR，避免同时维护两个 OCR 结果来源。
+- 仅靠字符数不足以识别扫描件：低文字页还必须存在覆盖大部分页面的栅格图，避免图片题注页
+  错误退化；扫描页 OCR 很稀疏时再调用 Vision，兼顾文字精度、图形语义和调用成本。
 - Docling 模型在 Worker 首次文字型 PDF 任务中延迟加载，API 上传进程不加载 Torch。
 - 模型完全在本地运行；只有扫描页和裁剪后的文档图片发送到 `.env` 配置的阿里云百炼。
 - 图片理解失败会降级为 OCR；单张附图失败不使已有正文失效，完整扫描页 OCR 失败则由任务重试。
+- 独立图片并发融合 OCR 与 Vision；模型输出经过确定性 Markdown/伪表格清理，纯装饰图通过
+  `NO_RETRIEVABLE_CONTENT` 协议不进入向量库。
 - 重复页眉页脚不进入索引；页码和左上角原点 BBox 进入 `SourceLocator`。
 - Docker Volume 持久化模型缓存，避免容器重建后重复下载。
 - 默认 uv 锁文件把 `torch/torchvision` 固定到 PyTorch 官方 CPU Index，避免 CPU 容器安装 CUDA 依赖；
@@ -77,7 +81,8 @@ PDFium 安全打开与逐页文字探测
 脱离文档和查询分布的“数学最优值”。切分顺序为：
 
 1. 严格保留标题、页码、Sheet/Range、Slide 等来源边界；同页元素 BBox 可合并。
-2. 表格按行切分，每个 Chunk 重复表头。
+2. 表格按行切分；识别 Docling 的前置题注和多级表头，每个 Chunk 在预算允许时重复完整前缀。
+   单个超宽行只有在无法同时容纳表头时省略表头，保证硬 Token 上限。
 3. 代码按行切分，每个 Chunk 保持独立围栏。
 4. 正文优先段落，再按句子，最后才用 Token 窗口。
 5. 自然单元间只携带不超过预算的尾部 overlap；新信息优先于强行重叠。
@@ -119,6 +124,8 @@ PDFium 安全打开与逐页文字探测
 - 上传延迟与文档复杂度解耦，浏览器能可靠看到处理进度。
 - Worker 可以横向扩展，崩溃任务可自动恢复。
 - 复杂 PDF 的阅读顺序、表格、图片和 BBox 可追踪。
+- 真实 15 页双栏论文样本能恢复 5 个表格区域和 7 个图片区域；所有 Chunk 保留页码/BBox，
+  带题注表格的续块仍携带列语义。该数字是当前验收样本结果，不是对任意 PDF 的质量承诺。
 - Chunk 预算真实按 Token 执行，表格和代码不再被普通字符窗口破坏。
 
 成本与限制：
@@ -137,6 +144,6 @@ PDFium 安全打开与逐页文字探测
 - [Docling Hybrid Chunking](https://docling-project.github.io/docling/concepts/chunking/)
 - [pdfplumber 官方 README](https://github.com/jsvine/pdfplumber/blob/stable/README.md)
 - [阿里云百炼视觉模型](https://help.aliyun.com/en/model-studio/vision-model/)
-- [阿里云百炼 Qwen OCR](https://help.aliyun.com/en/model-studio/qwen-vl-ocr)
+- [阿里云百炼 Qwen OCR API](https://help.aliyun.com/en/model-studio/qwen-vl-ocr-api-reference)
 - [Microsoft Advanced RAG：chunking 与组织](https://learn.microsoft.com/en-us/azure/developer/ai/advanced-retrieval-augmented-generation)
 - [Milvus RAG chunking 指南](https://milvus.io/ai-quick-reference/how-do-i-implement-efficient-document-chunking-for-rag-applications)

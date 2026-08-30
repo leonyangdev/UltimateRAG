@@ -282,6 +282,7 @@ export default function KnowledgeBaseWorkspacePage() {
                       {document.parser_name && (
                         <Badge variant="secondary" className="rounded-md font-mono text-sm">
                           {document.parser_name}
+                          {document.parser_version ? `@${document.parser_version}` : ""}
                         </Badge>
                       )}
                       <span className="flex items-center gap-1.5 text-sm text-muted-foreground">

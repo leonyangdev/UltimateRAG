@@ -12,7 +12,7 @@
 | Excel | `.xlsx` | `ExcelParser` | 工作表、单元格区域 |
 | PowerPoint | `.pptx` | `PowerPointParser` | 幻灯片序号、标题路径 |
 | HTML | `.html`、`.htm` | `HtmlParser` | 标题路径 |
-| 图片 | PNG / JPEG / WEBP / TIFF / BMP | `ImageOCRParser` | 文档级定位 |
+| 图片 | PNG / JPEG / WEBP / TIFF / BMP | `ImageOCRParser`（OCR + Vision） | 文档级定位 |
 
 所有格式最终都转换为**同一种内部模型**（`ParsedDocument` → `Block[]`），下游切块、向量化、检索完全不感知原始格式。
 
@@ -21,8 +21,8 @@
 PDF 是最复杂的格式，V2 采用「按页判定」的两条路径：
 
 ```text
-打开 PDF → 逐页探测文字量
-   ├── 低文字量页（扫描页）→ 本地渲染成 JPEG → 百炼 OCR → 图片文本块
+打开 PDF → 逐页探测文字量与最大栅格图覆盖率
+   ├── 低文字量 + 大图覆盖（扫描页）→ JPEG → 百炼 OCR；稀疏结果补 Vision
    └── 文字型页 → 本地 Docling 版面分析（Layout + TableFormer）
          ├── 恢复分栏阅读顺序
          ├── 识别标题层级、正文、列表、代码
@@ -32,6 +32,9 @@ PDF 是最复杂的格式，V2 采用「按页判定」的两条路径：
 ```
 
 这样**同一份 PDF 可以混合**：前几页是文字版、后几页是扫描版，都能正确处理。
+
+独立图片并发融合 OCR 精确文字与 Vision 的结构关系。模型返回的空表格、重复正文伪表格和
+`NO_RETRIEVABLE_CONTENT` 装饰图会在进入 Chunk 前清理。
 
 相关限制：
 
@@ -93,11 +96,39 @@ V2 没有认证与 ACL，**不应直接暴露到公网**。对公网部署前需
 | `EMBEDDING_DIMENSION` | `1024` | 必须与 Milvus Collection 一致 |
 | `LLM_MODEL` | `qwen-plus` | 答案生成 |
 | `OCR_MODEL` | `qwen3.5-ocr` | 扫描页/图片文字识别 |
-| `VISION_MODEL` | `qwen3-vl-flash` | PDF 图表语义理解 |
+| `VISION_MODEL` | `qwen3-vl-flash` | PDF/独立图片的图表与关系理解 |
 | `CHUNK_MAX_TOKENS` | `512` | Chunk Token 预算 |
 | `CHUNK_OVERLAP_TOKENS` | `64` | Chunk 重叠 Token |
 
 完整配置项见 [配置项速查](/reference/config)。
+
+## 7. 真实数据专项验收
+
+除合成格式 Smoke Test 外，仓库还提供真实图片和复杂 PDF 验收集：
+
+| 样本 | 重点验证 |
+|---|---|
+| `data/1.png` | 人工智能、机器学习、深度学习的嵌套包含关系；OCR 伪表格清理 |
+| `data/2.png` | Transformer 编码器/解码器、跨模块连线和输出概率关系 |
+| `data/attention is all you need.pdf` | 15 页双栏阅读顺序、表格、内嵌图片、页码和 BBox |
+
+启动完整 Docker 服务后执行：
+
+```bash
+uv run python scripts/smoke_v2_data.py --api-url http://localhost:8000
+```
+
+脚本只通过公开 API 完成以下闭环：
+
+1. 创建临时知识库并上传三份样本，断言每次请求立即返回 `202/PENDING`。
+2. 轮询文档状态，确认独立 Worker 最终推进到 `READY` 并记录 Parser 版本。
+3. 执行真实 Milvus Dense Retrieval，验证图片关系和 PDF Table 2 的题注、多级表头与数据行能在同一 Chunk 召回。
+4. 校验 PDF Table 2 的 Citation 指向第 8 页且带 BBox。
+5. 成功时删除脚本创建的知识库；失败时保留现场，便于检查状态、Chunk 和日志。
+
+PDFium 页面探测、Docling Layout/TableFormer 和切块均在本地 Worker 中运行；扫描页、裁剪图片、
+独立图片及 Embedding 会调用 `.env` 配置的阿里云百炼，因此执行该脚本会产生少量模型用量。
+需要保留验收数据供前端人工检查时添加 `--keep`。
 
 ## 下一步
 

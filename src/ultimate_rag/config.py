@@ -53,7 +53,9 @@ class Settings(BaseSettings):
     vision_model: str = "qwen3-vl-flash"
     # 百炼 Base64 OCR 接口要求原图小于 7 MB；默认留出编码和服务端校验余量。
     ocr_max_image_bytes: int = 6 * 1024 * 1024
+    ocr_max_output_tokens: int = Field(default=4096, ge=256, le=32_768)
     vision_max_image_bytes: int = 6 * 1024 * 1024
+    vision_max_output_tokens: int = Field(default=1536, ge=256, le=8192)
     model_timeout_seconds: float = 60.0
 
     max_upload_bytes: int = 10 * 1024 * 1024
@@ -72,6 +74,9 @@ class Settings(BaseSettings):
     worker_retry_delay_seconds: int = Field(default=10, ge=0, le=3600)
 
     pdf_native_text_threshold: int = 20
+    # 低文字页只有被大幅栅格图覆盖时才判为扫描页，避免把“少量题注 + 大图”误当纯 OCR 页。
+    pdf_scan_image_coverage_threshold: float = Field(default=0.65, ge=0.1, le=1.0)
+    pdf_scan_vision_text_threshold: int = Field(default=300, ge=0, le=10_000)
     pdf_render_scale: float = 2.0
     pdf_vision_concurrency: int = Field(default=2, ge=1, le=8)
     pdf_max_pictures: int = Field(default=20, ge=0, le=200)
