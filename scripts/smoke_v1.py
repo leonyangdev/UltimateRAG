@@ -18,6 +18,7 @@
 
 import argparse
 import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,28 @@ def ui_stream_events(response: httpx.Response) -> Iterator[dict[str, Any]]:
         yield event
 
 
+def wait_until_ready(
+    client: httpx.Client,
+    document_id: str,
+    *,
+    timeout_seconds: float = 180.0,
+) -> dict[str, Any]:
+    """轮询异步文档详情，直到 READY、FAILED 或超时。"""
+
+    deadline = time.monotonic() + timeout_seconds
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/documents/{document_id}")
+        require_success(response, "poll document")
+        latest = response.json()
+        if latest.get("status") == "READY":
+            return latest
+        if latest.get("status") == "FAILED":
+            raise RuntimeError(f"background ingestion failed: {latest}")
+        time.sleep(1)
+    raise TimeoutError(f"document did not reach READY: {latest}")
+
+
 def run_smoke_test(api_url: str, fixture: Path, question: str) -> None:
     """执行 Create → Upload → Retrieve → Stream Chat → Delete 完整验收。"""
 
@@ -94,8 +117,9 @@ def run_smoke_test(api_url: str, fixture: Path, question: str) -> None:
                 )
             require_success(upload, "upload document")
             document = upload.json()
-            if document.get("status") != "READY":
-                raise RuntimeError(f"document did not reach READY: {document}")
+            if upload.status_code != 202 or document.get("status") != "PENDING":
+                raise RuntimeError(f"document was not accepted asynchronously: {document}")
+            document = wait_until_ready(client, str(document["id"]))
             print(f"[2/5] Document ready: {document['id']}")
 
             retrieval = client.post(

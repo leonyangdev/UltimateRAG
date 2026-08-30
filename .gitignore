@@ -11,7 +11,11 @@ htmlcov/
 apps/web/.next/
 apps/web/node_modules/
 apps/docs/node_modules/
+apps/docs/.vitepress/cache/
+apps/docs/.vitepress/dist/
 apps/web/out/
 *.tsbuildinfo
 .idea/
 .vscode/
+
+.DS_Store

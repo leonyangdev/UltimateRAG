@@ -48,11 +48,12 @@ class ContextBuilder:
         for index, result in enumerate(results, start=1):
             # 每个 Section 都携带用户可读文件名和标题路径。没有标题时使用明确占位文本，
             # 避免空标签让模型和用户误以为来源元数据在格式化时丢失。
-            heading = " > ".join(result.heading_path) or "未命名章节"
+            locator = result.locator.display() if result.locator else ""
+            heading = locator or " > ".join(result.heading_path) or "未提供原文定位"
             section = (
                 f"[来源 {index}]\n"
                 f"文档：{result.filename}\n"
-                f"章节：{heading}\n"
+                f"位置：{heading}\n"
                 f"内容：\n{result.content}"
             )
 

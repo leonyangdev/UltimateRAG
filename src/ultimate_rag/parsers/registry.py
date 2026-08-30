@@ -1,6 +1,6 @@
 """解析器注册与解析器选择。
 
-V1 使用显式内存注册即可满足单进程需求；本模块不实现包发现或远程插件加载。
+V2 使用显式内存注册即可满足单进程需求；本模块不实现包发现或远程插件加载。
 """
 
 from ultimate_rag.domain.exceptions import UnsupportedDocumentTypeError

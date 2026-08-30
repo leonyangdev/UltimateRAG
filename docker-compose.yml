@@ -1,3 +1,4 @@
+# Compose 项目名保持稳定，V1 升级 V2 时继续复用已有事实数据卷。
 name: ultimate-rag-v1
 
 services:
@@ -82,6 +83,7 @@ services:
     restart: unless-stopped
 
   api:
+    image: ultimate-rag-api:local
     build:
       context: .
       dockerfile: Dockerfile.api
@@ -100,6 +102,14 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
       LLM_MODEL: ${LLM_MODEL:-qwen-plus}
+      OCR_MODEL: ${OCR_MODEL:-qwen3.5-ocr}
+      OCR_MAX_IMAGE_BYTES: ${OCR_MAX_IMAGE_BYTES:-6291456}
+      OCR_MAX_OUTPUT_TOKENS: ${OCR_MAX_OUTPUT_TOKENS:-4096}
+      VISION_MODEL: ${VISION_MODEL:-qwen3-vl-flash}
+      VISION_MAX_IMAGE_BYTES: ${VISION_MAX_IMAGE_BYTES:-6291456}
+      VISION_MAX_OUTPUT_TOKENS: ${VISION_MAX_OUTPUT_TOKENS:-1536}
+      PDF_SCAN_IMAGE_COVERAGE_THRESHOLD: ${PDF_SCAN_IMAGE_COVERAGE_THRESHOLD:-0.65}
+      PDF_SCAN_VISION_TEXT_THRESHOLD: ${PDF_SCAN_VISION_TEXT_THRESHOLD:-300}
       CORS_ORIGINS: http://localhost:3000,http://192.168.3.19:3000
     ports:
       - "8000:8000"
@@ -110,7 +120,46 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
     restart: on-failure
+
+  # Worker 使用同一镜像和 Parser 配置，但不开放端口，也不处理 HTTP。PostgreSQL 任务让容器
+  # 重启后仍可继续处理；本地模型缓存卷避免每次重建容器重复下载 Docling 模型。
+  worker:
+    image: ultimate-rag-api:local
+    command: ["python", "-m", "ultimate_rag.worker"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ultimate_rag:ultimate_rag@postgres:5432/ultimate_rag
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ultimate_rag
+      MINIO_SECRET_KEY: ultimate_rag_dev_secret
+      MINIO_SECURE: "false"
+      MINIO_BUCKET: documents
+      MILVUS_URI: http://milvus:19530
+      MILVUS_COLLECTION: knowledge_chunks
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+      OCR_MODEL: ${OCR_MODEL:-qwen3.5-ocr}
+      OCR_MAX_IMAGE_BYTES: ${OCR_MAX_IMAGE_BYTES:-6291456}
+      OCR_MAX_OUTPUT_TOKENS: ${OCR_MAX_OUTPUT_TOKENS:-4096}
+      VISION_MODEL: ${VISION_MODEL:-qwen3-vl-flash}
+      VISION_MAX_IMAGE_BYTES: ${VISION_MAX_IMAGE_BYTES:-6291456}
+      VISION_MAX_OUTPUT_TOKENS: ${VISION_MAX_OUTPUT_TOKENS:-1536}
+      PDF_SCAN_IMAGE_COVERAGE_THRESHOLD: ${PDF_SCAN_IMAGE_COVERAGE_THRESHOLD:-0.65}
+      PDF_SCAN_VISION_TEXT_THRESHOLD: ${PDF_SCAN_VISION_TEXT_THRESHOLD:-300}
+    volumes:
+      - docling_cache:/root/.cache
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
 
   web:
     build:
@@ -129,3 +178,4 @@ volumes:
   minio_data:
   etcd_data:
   milvus_data:
+  docling_cache:

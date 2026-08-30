@@ -1,4 +1,4 @@
-"""UltimateRAG V1 HTTP 路由。
+"""UltimateRAG V2 HTTP 路由。
 
 模块职责：
     验证 HTTP 输入、调用应用服务，并把领域结果映射为普通 JSON 或 AI SDK UI Message Stream。
@@ -126,20 +126,20 @@ async def delete_knowledge_base(knowledge_base_id: str, request: Request) -> Res
 @router.post(
     "/knowledge-bases/{knowledge_base_id}/documents",
     response_model=DocumentResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def upload_document(
     knowledge_base_id: str,
     request: Request,
     file: Annotated[UploadFile, File()],
 ) -> DocumentResponse:
-    """上传并同步完成 Markdown 的解析、切块、向量化和索引。"""
+    """可靠保存文件并提交后台任务；不等待解析、模型调用或索引完成。"""
     dependencies = container(request)
     content = await _read_bounded_upload(file, dependencies.max_upload_bytes)
-    value = await dependencies.ingestion.ingest(
+    value = await dependencies.ingestion.submit(
         knowledge_base_id,
-        file.filename or "document.md",
-        file.content_type or "text/markdown",
+        file.filename or "document.bin",
+        file.content_type or "application/octet-stream",
         content,
     )
     return DocumentResponse.from_domain(value)

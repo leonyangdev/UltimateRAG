@@ -7,14 +7,14 @@ import pytest
 
 from ultimate_rag.application import IngestionService
 from ultimate_rag.domain.exceptions import InvalidDocumentError
-from ultimate_rag.domain.ports import Chunker, Embedder, ObjectStorage, VectorStore
+from ultimate_rag.domain.ports import ObjectStorage
 from ultimate_rag.infrastructure.database.repository import Repository
 from ultimate_rag.parsers import MarkdownParser, ParserRegistry
 
 
 @pytest.mark.asyncio
-async def test_ingestion_rejects_non_markdown_mime_before_storage() -> None:
-    """明显非文本 MIME 即使使用 .md 后缀，也不应写入 MinIO。"""
+async def test_ingestion_rejects_extension_mime_mismatch_before_storage() -> None:
+    """扩展名与 MIME 没有任何 Parser 同时支持时，不应写入 MinIO。"""
 
     repository = AsyncMock()
     repository.get_knowledge_base.return_value = object()
@@ -23,13 +23,11 @@ async def test_ingestion_rejects_non_markdown_mime_before_storage() -> None:
         repository=cast(Repository, repository),
         storage=cast(ObjectStorage, storage),
         parser_registry=ParserRegistry([MarkdownParser()]),
-        chunker=cast(Chunker, AsyncMock()),
-        embedder=cast(Embedder, AsyncMock()),
-        vector_store=cast(VectorStore, AsyncMock()),
         max_upload_bytes=1024,
+        job_max_attempts=3,
     )
 
-    with pytest.raises(InvalidDocumentError, match="MIME"):
+    with pytest.raises(InvalidDocumentError, match="不支持的文档类型"):
         await service.ingest(
             knowledge_base_id="kb-1",
             filename="disguised.md",

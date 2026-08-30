@@ -4,6 +4,7 @@
 或模型厂商 SDK。
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -13,7 +14,7 @@ type JsonValue = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
 
 
 class DocumentStatus(StrEnum):
-    """同步摄取管线的可观察状态；只有完整索引成功后才能进入 ``READY``。"""
+    """后台摄取管线的用户可观察状态；完整索引成功前绝不能进入 ``READY``。"""
 
     PENDING = "PENDING"
     PARSING = "PARSING"
@@ -24,21 +25,109 @@ class DocumentStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class IngestionJobStatus(StrEnum):
+    """持久化摄取任务的内部调度状态。
+
+    文档状态面向用户表达当前处理阶段；任务状态只负责 Worker 领取、重试与完成语义，
+    二者刻意分开，避免把队列实现细节暴露到公开 API。
+    """
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
 class BlockType(StrEnum):
-    """统一文档模型中 V1 已识别的语义块类型。"""
+    """统一文档模型中可由不同 Parser 产生的语义块类型。"""
 
     HEADING = "HEADING"
     TEXT = "TEXT"
     CODE = "CODE"
     LIST = "LIST"
     QUOTE = "QUOTE"
+    TABLE = "TABLE"
+    IMAGE = "IMAGE"
 
 
 @dataclass(frozen=True, slots=True)
 class SourceLocator:
-    """内容在原文中的可追溯位置；V1 使用 Markdown 标题路径定位。"""
+    """跨文档格式的来源位置，供 Chunk、检索结果和 Citation 统一复用。
+
+    字段均为可选，因为不同格式能提供的定位精度不同：Markdown/HTML 使用标题路径，PDF
+    使用页码与可选边界框，Excel 使用 Sheet 与单元格范围，PowerPoint 使用幻灯片序号。
+    """
 
     heading_path: tuple[str, ...] = ()
+    page: int | None = None
+    bbox: tuple[float, float, float, float] | None = None
+    sheet: str | None = None
+    cell_range: str | None = None
+    slide: int | None = None
+
+    def to_metadata(self) -> dict[str, JsonValue]:
+        """转换为 PostgreSQL JSONB、Milvus JSON 和 API 都可接受的稳定字典。"""
+
+        value: dict[str, JsonValue] = {"heading_path": list(self.heading_path)}
+        if self.page is not None:
+            value["page"] = self.page
+        if self.bbox is not None:
+            value["bbox"] = list(self.bbox)
+        if self.sheet is not None:
+            value["sheet"] = self.sheet
+        if self.cell_range is not None:
+            value["cell_range"] = self.cell_range
+        if self.slide is not None:
+            value["slide"] = self.slide
+        return value
+
+    @classmethod
+    def from_metadata(cls, value: Mapping[str, object] | None) -> "SourceLocator":
+        """兼容缺失字段并从持久化 JSON 恢复强类型定位信息。"""
+
+        if not value:
+            return cls()
+        raw_bbox = value.get("bbox")
+        bbox = None
+        if isinstance(raw_bbox, list) and len(raw_bbox) == 4:
+            bbox = (
+                float(raw_bbox[0]),
+                float(raw_bbox[1]),
+                float(raw_bbox[2]),
+                float(raw_bbox[3]),
+            )
+        raw_heading = value.get("heading_path")
+        heading_path = (
+            tuple(str(item) for item in raw_heading) if isinstance(raw_heading, list) else ()
+        )
+        raw_page = value.get("page")
+        page = int(raw_page) if isinstance(raw_page, (str, int, float)) else None
+        raw_slide = value.get("slide")
+        slide = int(raw_slide) if isinstance(raw_slide, (str, int, float)) else None
+        return cls(
+            heading_path=heading_path,
+            page=page,
+            bbox=bbox,
+            sheet=str(value["sheet"]) if value.get("sheet") is not None else None,
+            cell_range=(str(value["cell_range"]) if value.get("cell_range") is not None else None),
+            slide=slide,
+        )
+
+    def display(self) -> str:
+        """生成面向 Prompt 和前端的紧凑定位文本。"""
+
+        parts: list[str] = []
+        if self.heading_path:
+            parts.append(" / ".join(self.heading_path))
+        if self.page is not None:
+            parts.append(f"第 {self.page} 页")
+        if self.sheet:
+            parts.append(f"工作表 {self.sheet}")
+        if self.cell_range:
+            parts.append(f"区域 {self.cell_range}")
+        if self.slide is not None:
+            parts.append(f"第 {self.slide} 张幻灯片")
+        return " · ".join(parts) or "未提供原文定位"
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +171,7 @@ class Chunk:
     content: str
     heading_path: tuple[str, ...]
     token_count: int
+    locator: SourceLocator | None = None
     metadata: dict[str, JsonValue] = field(default_factory=dict)
 
 
@@ -104,6 +194,7 @@ class RetrievalResult:
     content: str
     heading_path: tuple[str, ...]
     score: float
+    locator: SourceLocator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +205,7 @@ class Citation:
     filename: str
     chunk_id: str
     heading_path: tuple[str, ...]
+    locator: SourceLocator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +233,23 @@ class Document:
     status: DocumentStatus
     parser_name: str | None
     parser_version: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionJob:
+    """Worker 已领取或可领取的持久化文档摄取任务快照。"""
+
+    id: str
+    document_id: str
+    status: IngestionJobStatus
+    attempts: int
+    max_attempts: int
+    available_at: datetime
+    locked_at: datetime | None
+    worker_id: str | None
     error_message: str | None
     created_at: datetime
     updated_at: datetime

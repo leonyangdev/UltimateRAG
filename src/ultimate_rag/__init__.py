@@ -1,3 +1,3 @@
-"""UltimateRAG V1 package."""
+"""UltimateRAG V2 Document Intelligence package."""
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"

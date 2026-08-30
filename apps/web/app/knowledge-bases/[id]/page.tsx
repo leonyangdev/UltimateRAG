@@ -23,12 +23,14 @@ import { Separator } from "@/components/ui/separator";
 const STATUS_PRESENTATION: Record<string, { label: string; className: string }> = {
   READY: { label: "可检索", className: "border-emerald-200 bg-emerald-50 text-emerald-700" },
   FAILED: { label: "失败", className: "border-red-200 bg-red-50 text-red-700" },
-  PENDING: { label: "等待", className: "border-slate-200 bg-slate-50 text-slate-600" },
+  PENDING: { label: "排队中", className: "border-slate-200 bg-slate-50 text-slate-600" },
   PARSING: { label: "解析中", className: "border-amber-200 bg-amber-50 text-amber-700" },
   CHUNKING: { label: "切分中", className: "border-amber-200 bg-amber-50 text-amber-700" },
   EMBEDDING: { label: "向量化", className: "border-amber-200 bg-amber-50 text-amber-700" },
   INDEXING: { label: "索引中", className: "border-amber-200 bg-amber-50 text-amber-700" },
 };
+
+const TERMINAL_DOCUMENT_STATUSES = new Set(["READY", "FAILED"]);
 
 /**
  * 知识库工作台 —— 管理单个知识库的文档事实。
@@ -50,9 +52,12 @@ export default function KnowledgeBaseWorkspacePage() {
   const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBase | null>(null);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [pageError, setPageError] = useState("");
-  const [isDocumentWorking, setIsDocumentWorking] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
 
   const readyCount = documents.filter((document) => document.status === "READY").length;
+  const hasProcessingDocuments = documents.some(
+    (document) => !TERMINAL_DOCUMENT_STATUSES.has(document.status),
+  );
 
   /**
    * 并行刷新知识库元数据与文档状态。
@@ -92,28 +97,51 @@ export default function KnowledgeBaseWorkspacePage() {
     };
   }, [id]);
 
-  /** 上传 Markdown；同步 API 返回时文档已经完成 Parse → Chunk → Embed → Index。 */
+  /**
+   * 只在存在非终态文档时轮询。页面离开或全部完成后立即清除定时器，避免空知识库也持续
+   * 请求；两秒间隔兼顾状态可见性与数据库读取压力，不要求用户手动刷新页面。
+   */
+  useEffect(() => {
+    if (!hasProcessingDocuments) return;
+    let isActive = true;
+    const timer = window.setInterval(() => {
+      void api<DocumentItem[]>(`/api/knowledge-bases/${id}/documents`)
+        .then((docs) => {
+          if (isActive) setDocuments(docs);
+        })
+        .catch((value: unknown) => {
+          if (isActive) setPageError(value instanceof Error ? value.message : "文档状态刷新失败");
+        });
+    }, 2000);
+    return () => {
+      isActive = false;
+      window.clearInterval(timer);
+    };
+  }, [hasProcessingDocuments, id]);
+
+  /** 上传只等待可靠保存和任务入队；解析、向量化和索引由后台 Worker 继续执行。 */
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
     const input = form.elements.namedItem("document") as HTMLInputElement;
     if (!input.files?.[0]) return;
 
-    setIsDocumentWorking(true);
+    setIsUploading(true);
     setPageError("");
     const data = new FormData();
     data.append("file", input.files[0]);
     try {
-      await api<DocumentItem>(`/api/knowledge-bases/${id}/documents`, {
+      const accepted = await api<DocumentItem>(`/api/knowledge-bases/${id}/documents`, {
         method: "POST",
         body: data,
       });
+      // 202 响应已经包含 PENDING 文档，直接加入列表即可启动上方轮询，无需等待一次额外 GET。
+      setDocuments((current) => [accepted, ...current.filter((item) => item.id !== accepted.id)]);
       form.reset();
     } catch (value) {
       setPageError(value instanceof Error ? value.message : "文档上传失败");
     } finally {
-      await load();
-      setIsDocumentWorking(false);
+      setIsUploading(false);
     }
   }
 
@@ -148,7 +176,7 @@ export default function KnowledgeBaseWorkspacePage() {
             </h1>
             <Badge className="shrink-0 border-emerald-200 bg-emerald-50 text-sm text-emerald-700 shadow-none hover:bg-emerald-50">
               <span className="size-1 rounded-full bg-emerald-500" />
-              V1
+              V2
             </Badge>
           </div>
           <p className="mt-2 max-w-2xl text-base leading-7 text-muted-foreground">
@@ -195,25 +223,25 @@ export default function KnowledgeBaseWorkspacePage() {
 
         <form onSubmit={upload}>
           <label className="group flex cursor-pointer items-center gap-4 rounded-2xl border border-dashed border-border bg-card/60 px-5 py-6 transition-colors hover:border-primary/50 hover:bg-primary/5">
-            {isDocumentWorking ? (
+            {isUploading ? (
               <LoaderCircle className="size-5 shrink-0 animate-spin text-primary" />
             ) : (
               <Upload className="size-5 shrink-0 text-muted-foreground transition-colors group-hover:text-primary" />
             )}
             <div className="min-w-0">
               <span className="block text-base font-medium">
-                {isDocumentWorking ? "正在处理文档…" : "上传 Markdown 文档"}
+                {isUploading ? "正在上传并入队…" : "上传文档"}
               </span>
               <span className="mt-1 block text-sm text-muted-foreground">
-                上传后自动完成解析、切块、向量化与索引 · UTF-8 · 最大 10 MB
+                上传成功立即返回，后台解析完成后状态会自动更新 · 最大 10 MB
               </span>
             </div>
             <input
               className="sr-only"
               type="file"
               name="document"
-              accept=".md,.markdown,text/markdown"
-              disabled={isDocumentWorking}
+              accept=".md,.markdown,.pdf,.docx,.xlsx,.pptx,.html,.htm,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp"
+              disabled={isUploading}
               onChange={(event) => event.currentTarget.form?.requestSubmit()}
             />
           </label>
@@ -224,7 +252,7 @@ export default function KnowledgeBaseWorkspacePage() {
             <FileText className="mx-auto size-6 text-muted-foreground/60" />
             <p className="mt-4 text-lg font-medium">还没有知识来源</p>
             <p className="mt-2 text-base leading-7 text-muted-foreground">
-              上传第一份 Markdown 后，即可在「知识问答」中就这些内容提问。
+              上传第一份文档后，即可在「知识问答」中就这些内容提问。
             </p>
           </div>
         ) : (
@@ -234,6 +262,7 @@ export default function KnowledgeBaseWorkspacePage() {
                 label: document.status,
                 className: "",
               };
+              const canDelete = TERMINAL_DOCUMENT_STATUSES.has(document.status);
               return (
                 <article
                   key={document.id}
@@ -250,6 +279,12 @@ export default function KnowledgeBaseWorkspacePage() {
                       <Badge variant="outline" className={`text-sm ${presentation.className}`}>
                         {presentation.label}
                       </Badge>
+                      {document.parser_name && (
+                        <Badge variant="secondary" className="rounded-md font-mono text-sm">
+                          {document.parser_name}
+                          {document.parser_version ? `@${document.parser_version}` : ""}
+                        </Badge>
+                      )}
                       <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
                         <Clock3 className="size-4" />
                         {new Date(document.created_at).toLocaleString("zh-CN")}
@@ -267,6 +302,8 @@ export default function KnowledgeBaseWorkspacePage() {
                     size="icon-sm"
                     className="size-8 shrink-0 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100 focus:opacity-100"
                     onClick={() => removeDocument(document.id)}
+                    disabled={!canDelete}
+                    title={canDelete ? "删除文档" : "后台处理完成后才能删除"}
                     aria-label={`删除 ${document.filename}`}
                   >
                     <Trash2 className="size-4" />

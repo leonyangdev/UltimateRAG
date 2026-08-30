@@ -4,12 +4,20 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PATH="/app/.venv/bin:$PATH"
 
+# Docling 的 OpenCV 运行时需要基础图形/线程动态库；它们只用于后台 PDF 推理，不启动 GUI。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml uv.lock README.md ./
+# 依赖层不安装本项目本身，因此普通源码修改可以复用包含 Docling/Torch 的大体积缓存层。
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-install-project
+
 COPY src ./src
 COPY apps/api ./apps/api
 COPY alembic ./alembic
 COPY alembic.ini ./
-# BuildKit 缓存 uv 下载目录；源码变化仍会重装本项目，但不会反复下载大型二进制依赖。
+# 第二次同步只构建当前项目；锁文件依赖已在上一层安装，源码迭代无需重复编译整个 venv。
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 
 EXPOSE 8000

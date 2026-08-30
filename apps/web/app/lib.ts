@@ -32,7 +32,18 @@ export interface DocumentItem {
   status: string;
   error_message: string | null;
   parser_name: string | null;
+  parser_version: string | null;
   created_at: string;
+}
+
+/** 不同来源格式共享的可选原文位置。 */
+export interface SourceLocator {
+  heading_path: string[];
+  page: number | null;
+  bbox: number[] | null;
+  sheet: string | null;
+  cell_range: string | null;
+  slide: number | null;
 }
 
 export interface RetrievalResult {
@@ -41,6 +52,7 @@ export interface RetrievalResult {
   filename: string;
   content: string;
   heading_path: string[];
+  locator: SourceLocator | null;
   score: number;
 }
 
@@ -49,6 +61,19 @@ export interface Citation {
   filename: string;
   chunk_id: string;
   heading_path: string[];
+  locator: SourceLocator | null;
+}
+
+/** 把格式特有定位转换为用户可读短文本，顺序与后端 Prompt 保持一致。 */
+export function formatLocator(locator: SourceLocator | null, fallback: string[]): string {
+  if (!locator) return fallback.join(" / ") || "未提供原文定位";
+  const parts: string[] = [];
+  if (locator.heading_path.length) parts.push(locator.heading_path.join(" / "));
+  if (locator.page !== null) parts.push(`第 ${locator.page} 页`);
+  if (locator.sheet) parts.push(`工作表 ${locator.sheet}`);
+  if (locator.cell_range) parts.push(`区域 ${locator.cell_range}`);
+  if (locator.slide !== null) parts.push(`第 ${locator.slide} 张幻灯片`);
+  return parts.join(" · ") || "未提供原文定位";
 }
 
 export interface ChatResult {

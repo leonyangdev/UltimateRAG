@@ -4,23 +4,31 @@ Repository 负责事务边界和 ORM/领域模型映射，不编排 MinIO、Milv
 """
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ultimate_rag.domain.exceptions import ResourceNotFoundError
-from ultimate_rag.domain.models import Chunk, Document, DocumentStatus, KnowledgeBase
+from ultimate_rag.domain.models import (
+    Chunk,
+    Document,
+    DocumentStatus,
+    IngestionJob,
+    IngestionJobStatus,
+    KnowledgeBase,
+)
 from ultimate_rag.infrastructure.database.models import (
     ChunkModel,
     DocumentModel,
+    IngestionJobModel,
     KnowledgeBaseModel,
 )
 
 
 class Repository:
-    """封装 V1 知识库、文档和 Chunk 的数据库读写。"""
+    """封装知识库、文档和 Chunk 的数据库事实读写。"""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         """接收可复用 Session 工厂，每个公共操作自行定义短事务。"""
@@ -103,6 +111,218 @@ class Repository:
             session.add(model)
         return self._document(model)
 
+    async def create_document_with_job(
+        self,
+        *,
+        document_id: str,
+        knowledge_base_id: str,
+        filename: str,
+        mime_type: str,
+        extension: str,
+        object_key: str,
+        sha256: str,
+        max_attempts: int,
+    ) -> Document:
+        """在一个事务内创建 ``PENDING`` 文档和唯一摄取任务。
+
+        文档事实与任务必须原子提交。若先创建文档、后创建任务时进程退出，用户会看到一个
+        永远停留在 ``PENDING`` 的文档；同一事务可以从根源上消除这个丢任务窗口。
+        """
+
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        now = datetime.now(UTC)
+        document = DocumentModel(
+            id=document_id,
+            knowledge_base_id=knowledge_base_id,
+            filename=filename,
+            mime_type=mime_type,
+            extension=extension,
+            object_key=object_key,
+            sha256=sha256,
+            status=DocumentStatus.PENDING.value,
+        )
+        job = IngestionJobModel(
+            id=str(uuid4()),
+            document_id=document_id,
+            status=IngestionJobStatus.PENDING.value,
+            attempts=0,
+            max_attempts=max_attempts,
+            available_at=now,
+        )
+        async with self._session_factory() as session, session.begin():
+            if await session.get(KnowledgeBaseModel, knowledge_base_id) is None:
+                raise ResourceNotFoundError("知识库不存在")
+            session.add_all([document, job])
+        return self._document(document)
+
+    async def claim_ingestion_job(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: int,
+    ) -> IngestionJob | None:
+        """以行锁跳过其他 Worker 正在领取的任务，并回收租约过期任务。
+
+        ``FOR UPDATE SKIP LOCKED`` 只用于队列表这一明确场景：多个 Worker 可以并行领取，
+        但同一事务瞬间只有一个 Worker 能修改某行。``locked_at`` 租约让进程崩溃后的
+        ``RUNNING`` 任务重新可见，不需要人工修改数据库。
+        """
+
+        if not worker_id.strip():
+            raise ValueError("worker_id cannot be empty")
+        if lease_seconds < 30:
+            raise ValueError("lease_seconds must be at least 30")
+
+        now = datetime.now(UTC)
+        stale_before = now - timedelta(seconds=lease_seconds)
+        async with self._session_factory() as session, session.begin():
+            # 最后一次尝试若随进程崩溃而租约过期，普通领取条件不会再选中。先在短事务内
+            # 对这种行做终态收敛；若文档已 READY，说明只是“任务完成提交”窗口崩溃，任务可
+            # 直接成功，否则明确 FAILED，不能永久留在 RUNNING。
+            exhausted_statement = (
+                select(IngestionJobModel)
+                .where(
+                    IngestionJobModel.status == IngestionJobStatus.RUNNING.value,
+                    IngestionJobModel.locked_at.is_not(None),
+                    IngestionJobModel.locked_at <= stale_before,
+                    IngestionJobModel.attempts >= IngestionJobModel.max_attempts,
+                )
+                .order_by(IngestionJobModel.locked_at)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            exhausted = await session.scalar(exhausted_statement)
+            if exhausted is not None:
+                document = await session.get(DocumentModel, exhausted.document_id)
+                is_ready = document is not None and document.status == DocumentStatus.READY.value
+                exhausted.status = (
+                    IngestionJobStatus.SUCCEEDED.value
+                    if is_ready
+                    else IngestionJobStatus.FAILED.value
+                )
+                exhausted.locked_at = None
+                exhausted.worker_id = None
+                if not is_ready:
+                    message = "Worker 租约过期且已达到最大尝试次数"
+                    exhausted.error_message = message
+                    if document is not None:
+                        document.status = DocumentStatus.FAILED.value
+                        document.error_message = message
+                return None
+
+            statement = (
+                select(IngestionJobModel)
+                .where(
+                    IngestionJobModel.attempts < IngestionJobModel.max_attempts,
+                    or_(
+                        and_(
+                            IngestionJobModel.status == IngestionJobStatus.PENDING.value,
+                            IngestionJobModel.available_at <= now,
+                        ),
+                        and_(
+                            IngestionJobModel.status == IngestionJobStatus.RUNNING.value,
+                            IngestionJobModel.locked_at.is_not(None),
+                            IngestionJobModel.locked_at <= stale_before,
+                        ),
+                    ),
+                )
+                .order_by(IngestionJobModel.available_at, IngestionJobModel.created_at)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            model = await session.scalar(statement)
+            if model is None:
+                return None
+
+            model.status = IngestionJobStatus.RUNNING.value
+            model.attempts += 1
+            model.locked_at = now
+            model.worker_id = worker_id
+            model.error_message = None
+            return self._ingestion_job(model)
+
+    async def heartbeat_ingestion_job(self, job_id: str, worker_id: str) -> bool:
+        """续租当前 Worker 拥有的运行中任务；所有权变化时返回 ``False``。"""
+
+        async with self._session_factory() as session, session.begin():
+            model = await session.get(IngestionJobModel, job_id)
+            if (
+                model is None
+                or model.status != IngestionJobStatus.RUNNING.value
+                or model.worker_id != worker_id
+            ):
+                return False
+            model.locked_at = datetime.now(UTC)
+            return True
+
+    async def complete_ingestion_job(self, job_id: str, worker_id: str) -> None:
+        """在文档已经 ``READY`` 后，把当前租约拥有者的任务标记为完成。"""
+
+        async with self._session_factory() as session, session.begin():
+            model = await session.get(IngestionJobModel, job_id)
+            if (
+                model is None
+                or model.status != IngestionJobStatus.RUNNING.value
+                or model.worker_id != worker_id
+            ):
+                raise RuntimeError("摄取任务租约已丢失，不能提交完成状态")
+            document = await session.get(DocumentModel, model.document_id)
+            if document is None or document.status != DocumentStatus.READY.value:
+                raise RuntimeError("文档尚未 READY，不能提交摄取任务")
+            model.status = IngestionJobStatus.SUCCEEDED.value
+            model.locked_at = None
+            model.worker_id = None
+            model.error_message = None
+
+    async def fail_ingestion_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        error_message: str,
+        retryable: bool,
+        retry_delay_seconds: int,
+    ) -> bool:
+        """记录一次失败，并返回任务是否已安排有限重试。
+
+        参数错误和损坏文件直接终止；临时网络/服务故障仅在剩余尝试次数内重试。
+        文档与任务状态在同一 PostgreSQL 事务更新，前端不会观察到相互矛盾的状态。
+        """
+
+        if retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds cannot be negative")
+        safe_error = (error_message.strip() or "Unknown ingestion error")[:1000]
+        async with self._session_factory() as session, session.begin():
+            model = await session.get(IngestionJobModel, job_id)
+            if (
+                model is None
+                or model.status != IngestionJobStatus.RUNNING.value
+                or model.worker_id != worker_id
+            ):
+                raise RuntimeError("摄取任务租约已丢失，不能提交失败状态")
+            document = await session.get(DocumentModel, model.document_id)
+            if document is None:
+                raise ResourceNotFoundError("文档不存在")
+
+            should_retry = retryable and model.attempts < model.max_attempts
+            model.error_message = safe_error
+            model.locked_at = None
+            model.worker_id = None
+            if should_retry:
+                model.status = IngestionJobStatus.PENDING.value
+                model.available_at = datetime.now(UTC) + timedelta(seconds=retry_delay_seconds)
+                document.status = DocumentStatus.PENDING.value
+                document.error_message = (
+                    f"第 {model.attempts}/{model.max_attempts} 次处理暂时失败，"
+                    f"系统将自动重试：{safe_error}"
+                )[:1000]
+            else:
+                model.status = IngestionJobStatus.FAILED.value
+                document.status = DocumentStatus.FAILED.value
+                document.error_message = safe_error
+            return should_retry
+
     async def list_documents(self, knowledge_base_id: str) -> list[Document]:
         """返回知识库文档；知识库不存在与空知识库使用不同语义。"""
         # 先显式读取知识库，确保“不存在”抛出 404，而真实存在但没有文档时返回空列表。
@@ -123,6 +343,18 @@ class Repository:
             if model is None:
                 raise ResourceNotFoundError("文档不存在")
             return self._document(model)
+
+    async def list_ready_document_ids(self, knowledge_base_id: str) -> set[str]:
+        """返回知识库内允许参与检索的 ``READY`` 文档 ID 集合。"""
+
+        async with self._session_factory() as session:
+            result = await session.scalars(
+                select(DocumentModel.id).where(
+                    DocumentModel.knowledge_base_id == knowledge_base_id,
+                    DocumentModel.status == DocumentStatus.READY.value,
+                )
+            )
+            return set(result)
 
     async def update_document_status(
         self,
@@ -207,6 +439,24 @@ class Repository:
             status=DocumentStatus(model.status),
             parser_name=model.parser_name,
             parser_version=model.parser_version,
+            error_message=model.error_message,
+            created_at=Repository._datetime(model.created_at),
+            updated_at=Repository._datetime(model.updated_at),
+        )
+
+    @staticmethod
+    def _ingestion_job(model: IngestionJobModel) -> IngestionJob:
+        """把 ORM 任务映射为 Worker 可安全持有的不可变快照。"""
+
+        return IngestionJob(
+            id=model.id,
+            document_id=model.document_id,
+            status=IngestionJobStatus(model.status),
+            attempts=model.attempts,
+            max_attempts=model.max_attempts,
+            available_at=Repository._datetime(model.available_at),
+            locked_at=model.locked_at,
+            worker_id=model.worker_id,
             error_message=model.error_message,
             created_at=Repository._datetime(model.created_at),
             updated_at=Repository._datetime(model.updated_at),

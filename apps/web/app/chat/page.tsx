@@ -263,7 +263,7 @@ export default function ChatPage() {
                 <p className="mt-3 max-w-md text-base leading-7 text-muted-foreground">
                   {pageError
                     ? "请检查后端服务是否可用，刷新页面重试。"
-                    : "先创建一个知识库并上传 Markdown 文档，然后回到这里开始问答。"}
+                    : "先创建一个知识库并上传文档，然后回到这里开始问答。"}
                 </p>
                 <Button className="mt-6" asChild>
                   <Link href="/knowledge-bases">
@@ -283,7 +283,7 @@ export default function ChatPage() {
                     <span className="font-medium text-foreground">
                       「{selectedKnowledgeBase?.name ?? "所选知识库"}」
                     </span>
-                    ，并附带命中的文档、章节与相似度，便于核验和学习 RAG 链路。
+                    ，并附带命中文档、页码/章节/工作表等来源位置与相似度，便于核验 RAG 链路。
                   </p>
                   <div className="mt-6 flex flex-wrap justify-center gap-2">
                     {["总结文档的核心内容", "有哪些关键结论？", "依据来自哪些章节？"].map((prompt) => (
@@ -329,7 +329,7 @@ export default function ChatPage() {
                 </span>
                 <h2 className="mt-5 text-2xl font-semibold tracking-tight">观察召回，而不调用 LLM</h2>
                 <p className="mt-3 max-w-md text-base leading-7 text-muted-foreground">
-                  选择知识库后输入查询，查看 Top-5 Chunk、章节路径和余弦相似度，用于单独评估 Retrieval 效果。
+                  选择知识库后输入查询，查看 Top-5 Chunk、原文位置和余弦相似度，用于单独评估 Retrieval 效果。
                 </p>
               </div>
             ) : isRetrieving ? (
