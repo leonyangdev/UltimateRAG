@@ -1,10 +1,10 @@
 # UltimateRAG
 
 一个从最小可用 RAG 持续演进为企业级知识平台的学习型工程。当前仓库实现
-**V2.0 · Document Intelligence**：在保留 V1 可运行 RAG 闭环的基础上，把多种原始格式统一为
-可追溯的文档领域模型，使新增 Parser 不需要修改 RAG 主流程。
+**V3.0 · Advanced Retrieval**：在 V2 多格式文档智能与异步摄取之上，引入 Dense + BM25
+混合召回、RRF、查询改写、二阶段重排、文档过滤和 Small2Big 上下文，并完整保留排序证据。
 
-## V2 能做什么
+## V3 能做什么
 
 用户可以在 Web 中完成以下闭环：
 
@@ -14,12 +14,14 @@
 4. 使用本地 Docling 恢复 PDF 分栏顺序、标题、表格、图片区域和 BBox，扫描页融合百炼 OCR/Vision
 5. 对独立图片融合精确文字与箭头、流程、嵌套关系，并清理 OCR 伪表格噪声
 6. 前端自动刷新文档从 `PENDING` 到 `READY/FAILED` 的状态和实际 Parser
-7. 使用 Milvus Dense Retrieval 独立调试召回内容和分数
-8. 使用阿里云百炼模型进行知识库问答
-9. 查看答案引用的章节、PDF 页码/BBox、Excel 区域或 PPT 幻灯片
-10. 删除文档或知识库，并同步清理三类存储
+7. 在 Dense、Milvus 本地 BM25 Sparse、Hybrid 三种检索模式间切换
+8. 以 RRF 融合原查询/改写查询的多路排名，再用百炼 `qwen3-rerank` 重排有限候选
+9. 按文档白名单过滤，并用同 Parent 相邻 Child 扩展回答上下文
+10. 查看查询变体、召回通道、各阶段分数、降级原因和精确 Citation
+11. 使用阿里云百炼模型进行知识库问答，并用 JSONL 指标工具做检索消融评估
+12. 删除文档或知识库，并同步清理三类存储和两个 Milvus 派生索引
 
-V2 明确不包含混合检索、Reranker、Agent、ACL、DLQ 控制台和 RAGOps；这些属于后续版本。
+V3 明确不包含 ACL/认证/审计、DLQ 控制台、完整 RAGOps 和 Agent/GraphRAG；这些属于后续版本。
 
 ## 架构
 
@@ -29,7 +31,7 @@ Next.js Web
     ▼
 FastAPI Interface
     ├── Upload → MinIO + PostgreSQL Job → 202
-    └── RAG Application → Retrieve → Context → Generate → Citation
+    └── RAG Application → Filter/Rewrite → Dense+BM25 → RRF/Rerank → Small2Big → Generate
 
 PostgreSQL Job
     ↓
@@ -42,7 +44,9 @@ Domain Ports
     ├── VisionClient     → BailianVisionClient（图表/架构图语义）
     ├── Chunker          → StructureAwareChunker（结构 + Token + 类型）
     ├── Embedder         → BailianEmbedder
-    ├── VectorStore      → MilvusVectorStore
+    ├── VectorStore      → MilvusVectorStore（Dense + 本地 BM25）
+    ├── QueryRewriter    → BailianQueryRewriter
+    ├── Reranker         → BailianReranker
     ├── ObjectStorage    → MinioObjectStorage
     └── LLMClient        → BailianLLMClient
 
@@ -60,18 +64,21 @@ Domain Ports
 - Worker 使用 PostgreSQL 租约、心跳和有限重试，进程重启不会丢失上传任务
 - 知识库内容按不可信输入处理，不能覆盖系统 Prompt
 
-详细设计见 [V2 实现说明](docs/4.v2_implementation.md)，V1 的基础闭环见
-[V1 实现说明](docs/3.v1_implementation.md)。
+详细设计见 [V3 实现说明](docs/5.v3_implementation.md) 和
+[ADR-002：Hybrid Retrieval](docs/adr/ADR-002-v3-hybrid-retrieval.md)。V2 文档智能见
+[V2 实现说明](docs/4.v2_implementation.md)。
 
 ## 技术栈
 
 - Python 3.12、FastAPI、Pydantic v2
 - Docling Layout/TableFormer、PDFium、tiktoken
 - SQLAlchemy 2、Alembic、PostgreSQL 16
-- MinIO、Milvus 2.5、Attu
+- MinIO、Milvus 2.5（COSINE + BM25 Function）、Attu
 - 阿里云百炼 OpenAI 兼容 API
   - Embedding 默认 `text-embedding-v4`，1024 维
   - LLM 默认 `qwen-plus`
+  - Query Rewrite 默认 `qwen-plus`
+  - Reranker 默认 `qwen3-rerank`
   - OCR 默认 `qwen3.5-ocr`
   - PDF/独立图片理解默认 `qwen3-vl-flash`
 - Next.js 16、React 19、TypeScript、Tailwind CSS 4、shadcn/ui、AI SDK
@@ -91,6 +98,16 @@ DASHSCOPE_API_KEY=你的API-Key
 EMBEDDING_MODEL=text-embedding-v4
 EMBEDDING_DIMENSION=1024
 LLM_MODEL=qwen-plus
+QUERY_REWRITE_MODEL=qwen-plus
+RERANK_MODEL=qwen3-rerank
+RERANK_URL=https://dashscope.aliyuncs.com/compatible-api/v1/reranks
+RERANK_MAX_REQUEST_TOKENS=120000
+RETRIEVAL_CANDIDATE_K=30
+RETRIEVAL_RRF_K=60
+RETRIEVAL_QUERY_REWRITE=true
+RETRIEVAL_RERANK=true
+RETRIEVAL_PARENT_EXPANSION=true
+MILVUS_SPARSE_COLLECTION=knowledge_chunks_sparse_v3
 OCR_MODEL=qwen3.5-ocr
 OCR_MAX_IMAGE_BYTES=6291456
 OCR_MAX_OUTPUT_TOKENS=4096
@@ -140,6 +157,13 @@ uv run python scripts/smoke_v2_data.py --api-url http://localhost:8000
 
 脚本断言上传立即返回、后台最终 `READY`、图片关系可召回、PDF Table 2 续块带完整多级表头，
 并校验页码/BBox；默认只删除脚本自己创建的临时知识库。
+
+从 V1/V2 升级后，先把 PostgreSQL 中的历史 READY Chunk 回填到本地 BM25 Collection；该命令
+不会调用百炼或重新生成 Dense Embedding：
+
+```bash
+uv run python scripts/rebuild_sparse_index.py
+```
 
 ### 3. 打开服务
 
@@ -218,6 +242,7 @@ DELETE /api/documents/{id}
 
 ```text
 POST /api/retrieval/search
+POST /api/retrieval/explain
 POST /api/chat
 POST /api/chat/stream
 ```
@@ -228,12 +253,19 @@ POST /api/chat/stream
 {
   "knowledge_base_id": "kb-id",
   "query": "BGE-M3 是什么？",
-  "top_k": 5
+  "top_k": 5,
+  "mode": "hybrid",
+  "candidate_k": 30,
+  "enable_query_rewrite": true,
+  "enable_rerank": true,
+  "enable_parent_expansion": true,
+  "document_ids": []
 }
 ```
 
-问答请求使用 `question` 字段。响应同时包含 `answer`、`citations` 和用于学习调试的
-`retrieval_results`。
+`/retrieval/search` 为兼容旧客户端仍返回数组；`/retrieval/explain` 返回 `{results, trace}`，可查看
+查询变体、候选数量、实际执行阶段与降级原因。问答请求使用 `question` 字段，响应同时包含
+`answer`、`citations`、`retrieval_results` 和 `retrieval_trace`。
 
 ## 文档处理状态
 
@@ -281,6 +313,18 @@ uv run python scripts/smoke_v2.py --api-url http://localhost:8000
 V2 脚本会动态生成全部支持格式，先验证上传立即返回 `202/PENDING`，再轮询 Worker 到 `READY`，
 最后验证来源位置、检索、流式答案和 Citation，并删除临时知识库及其跨存储资源。
 
+V3 高级检索专项验收使用（会真实调用百炼 Embedding、Query Rewrite 和 Reranker）：
+
+```bash
+uv run python scripts/smoke_v3.py --api-url http://localhost:8000
+```
+
+检索参数不应只凭经验调优。准备人工相关 Chunk 标注后可比较 Dense/Sparse/Hybrid 与消融配置：
+
+```bash
+uv run python scripts/evaluate_retrieval.py eval.jsonl --mode hybrid --k 5
+```
+
 ## 目录
 
 ```text
@@ -296,6 +340,8 @@ src/ultimate_rag/ocr/             百炼 OCR 适配器
 src/ultimate_rag/chunkers/        结构感知切块
 src/ultimate_rag/embeddings/      百炼向量适配器
 src/ultimate_rag/vectorstores/    Milvus 适配器
+src/ultimate_rag/retrieval/       Query Rewrite、Reranker 适配器与 RRF
+src/ultimate_rag/evaluation/      离线检索排名指标
 src/ultimate_rag/generation/      百炼 LLM 适配器
 src/ultimate_rag/infrastructure/  PostgreSQL / MinIO
 alembic/                          数据库迁移
@@ -312,4 +358,4 @@ docs/                             产品、架构与实现文档
 - `.env`、API Key 和生产凭据禁止提交
 - 默认 Docker 密码只适合本地开发
 - 检索内容和 LLM 输出都视为不可信数据
-- 对公网部署前仍需要认证、ACL、限流与审计；这些不属于 V2 范围
+- 对公网部署前仍需要认证、ACL、限流与审计；这些不属于 V3 范围

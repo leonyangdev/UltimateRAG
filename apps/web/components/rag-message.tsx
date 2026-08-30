@@ -2,7 +2,12 @@ import { Bot, User } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { Citation, RAGMessage as RAGMessageType, RetrievalResult } from "@/app/lib";
+import type {
+  Citation,
+  RAGMessage as RAGMessageType,
+  RetrievalResult,
+  RetrievalTrace,
+} from "@/app/lib";
 import { RetrievalEvidence } from "@/components/retrieval-evidence";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
@@ -28,10 +33,12 @@ export function RAGMessage({ message }: RAGMessageProps) {
 
   let citations: Citation[] = [];
   let results: RetrievalResult[] = [];
+  let trace: RetrievalTrace | null = null;
   for (const part of message.parts) {
     if (part.type === "data-retrieval") {
       citations = part.data.citations;
       results = part.data.retrieval_results;
+      trace = part.data.retrieval_trace;
     }
   }
 
@@ -57,7 +64,7 @@ export function RAGMessage({ message }: RAGMessageProps) {
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
           </div>
         )}
-        {!isUser && <RetrievalEvidence citations={citations} results={results} />}
+        {!isUser && <RetrievalEvidence citations={citations} results={results} trace={trace} />}
       </div>
 
       {isUser && (

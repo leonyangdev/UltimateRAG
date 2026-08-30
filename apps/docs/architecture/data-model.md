@@ -108,7 +108,7 @@ Parser 的输出单元：`id`（稳定 UUID5）、`type`（BlockType）、`conte
 | `heading_path` | 章节路径（用于检索展示与 Citation） |
 | `token_count` | Token 数（与实际切分同一 Tokenizer） |
 | `locator` | 来源定位 |
-| `metadata` | 切块策略、来源标签、文件名等 |
+| `metadata` | 切块策略、来源标签、文件名、V3 `parent_id/parent_child_*` 等 |
 
 ### EmbeddedChunk —— Chunk + 向量
 
@@ -116,13 +116,22 @@ Parser 的输出单元：`id`（稳定 UUID5）、`type`（BlockType）、`conte
 
 ### RetrievalResult —— 检索命中
 
-召回结果：`chunk_id / knowledge_base_id / document_id / filename / content / heading_path / score / locator`。
+除基础来源字段外，V3 还保留 `dense_score / sparse_score / fusion_score / rerank_score`、
+`retrieval_sources`、`matched_content` 和 `context_chunk_ids`。`score` 表示当前最终排序实际使用的
+分数，不能跨模式或跨请求直接比较。
 
 保留完整来源信息，**检索结果可以直接构造 Citation，无需再查库**（避免 N+1）。
 
 ### Citation —— 面向 API 的引用
 
-`document_id / filename / chunk_id / heading_path / locator`。不暴露向量库内部字段。
+`document_id / filename / chunk_id / heading_path / locator / context_chunk_ids`。不暴露向量库内部字段，
+并同时保留精确命中锚点与 Small2Big 实际上下文范围。
+
+### RetrievalOptions / RetrievalTrace / RetrievalRun
+
+- `RetrievalOptions`：一次请求的模式、候选宽度、阶段开关和文档白名单
+- `RetrievalTrace`：查询变体、候选/结果数、实际执行阶段和降级原因
+- `RetrievalRun`：不可变的 `results + trace`，供 Explain API 与 RAG 共用
 
 ### IngestionJob —— 后台任务快照
 
@@ -138,8 +147,8 @@ ParsedDocument + Block[]        （Domain 模型）
 Chunk[]                         （Domain 模型）
    ↓ Embedder
 EmbeddedChunk[]                 （Domain 模型）
-   ↓ Milvus
-检索 → RetrievalResult[]        （Domain 模型）
+   ↓ Milvus Dense + BM25 → RRF → Rerank → Small2Big
+检索 → RetrievalRun             （RetrievalResult[] + RetrievalTrace）
    ↓ ContextBuilder
 上下文文本                       （普通字符串）
    ↓ LLM
@@ -150,7 +159,7 @@ EmbeddedChunk[]                 （Domain 模型）
 
 ## 5. 端口（Protocol）—— 可替换能力的契约
 
-`domain/ports.py` 定义了 8 个端口，它们是「可替换性」的根基。下面是最核心的几个：
+`domain/ports.py` 只为明确存在多实现或需要隔离外部依赖的能力定义小端口。下面是核心片段：
 
 ```python
 class DocumentParser(Protocol):
@@ -166,9 +175,17 @@ class Embedder(Protocol):
 class VectorStore(Protocol):
     async def ensure_collection(self) -> None: ...
     async def upsert(self, chunks: Sequence[EmbeddedChunk]) -> None: ...
+    async def upsert_sparse(self, chunks: Sequence[Chunk]) -> None: ...
     async def search(self, query_vector, knowledge_base_id, top_k) -> list[RetrievalResult]: ...
+    async def search_sparse(self, query, knowledge_base_id, top_k) -> list[RetrievalResult]: ...
     async def delete_by_document(self, document_id: str) -> None: ...
     async def delete_by_knowledge_base(self, knowledge_base_id: str) -> None: ...
+
+class QueryRewriter(Protocol):
+    async def rewrite(self, query: str) -> str | None: ...
+
+class Reranker(Protocol):
+    async def rerank(self, query, candidates, top_n) -> list[RerankResult]: ...
 
 class LLMClient(Protocol):
     async def generate(self, system_prompt: str, user_prompt: str) -> str: ...

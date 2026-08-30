@@ -63,10 +63,19 @@ class StructureAwareChunker:
         """先建立语义 Section，再按内容类型切分并生成稳定 ID。"""
 
         chunks: list[Chunk] = []
-        for section in self._build_sections(document.blocks):
+        for section_index, section in enumerate(self._build_sections(document.blocks)):
             prefix = self._heading_prefix(section.locator.heading_path)
             body_budget = self._body_budget(prefix)
-            for piece, strategy in self._split_section(section, body_budget):
+            pieces = self._split_section(section, body_budget)
+            # Parent ID 表示 Parser 已恢复出的一个语义 Section。检索仍命中较小 Child Chunk，
+            # V3 只在最终 Context 阶段按该边界带回相邻 Child，兼顾精确召回与上下文完整性。
+            parent_id = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"{document.document_id}:parent:{section_index}:{section.kind}",
+                )
+            )
+            for child_index, (piece, strategy) in enumerate(pieces):
                 content = f"{prefix}\n\n{piece}" if prefix else piece
                 token_count = self._count_tokens(content)
                 if not content.strip():
@@ -92,6 +101,9 @@ class StructureAwareChunker:
                     "layout_engines": layout_engines,
                     "split_strategy": strategy,
                     "tokenizer": self._encoding.name,
+                    "parent_id": parent_id,
+                    "parent_child_index": child_index,
+                    "parent_child_count": len(pieces),
                 }
                 chunks.append(
                     Chunk(

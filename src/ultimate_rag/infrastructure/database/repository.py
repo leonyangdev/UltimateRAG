@@ -5,6 +5,7 @@ Repository 负责事务边界和 ORM/领域模型映射，不编排 MinIO、Milv
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import uuid4
 
 from sqlalchemy import and_, delete, or_, select
@@ -17,7 +18,9 @@ from ultimate_rag.domain.models import (
     DocumentStatus,
     IngestionJob,
     IngestionJobStatus,
+    JsonValue,
     KnowledgeBase,
+    SourceLocator,
 )
 from ultimate_rag.infrastructure.database.models import (
     ChunkModel,
@@ -344,17 +347,127 @@ class Repository:
                 raise ResourceNotFoundError("文档不存在")
             return self._document(model)
 
-    async def list_ready_document_ids(self, knowledge_base_id: str) -> set[str]:
-        """返回知识库内允许参与检索的 ``READY`` 文档 ID 集合。"""
+    async def list_ready_document_ids(
+        self,
+        knowledge_base_id: str,
+        document_ids: Sequence[str] = (),
+    ) -> set[str]:
+        """返回知识库内允许参与检索且满足显式文档过滤的 ID 集合。
+
+        PostgreSQL 是文档状态事实来源。调用方即使传入其他知识库、正在处理或已失败的文档 ID，
+        也只会得到当前知识库中 ``READY`` 的交集，不能依靠客户端过滤跨越业务边界。
+        """
 
         async with self._session_factory() as session:
-            result = await session.scalars(
-                select(DocumentModel.id).where(
-                    DocumentModel.knowledge_base_id == knowledge_base_id,
-                    DocumentModel.status == DocumentStatus.READY.value,
+            statement = select(DocumentModel.id).where(
+                DocumentModel.knowledge_base_id == knowledge_base_id,
+                DocumentModel.status == DocumentStatus.READY.value,
+            )
+            if document_ids:
+                statement = statement.where(DocumentModel.id.in_(document_ids))
+            result = await session.scalars(statement)
+            return set(result)
+
+    async def get_chunks_with_neighbors(
+        self,
+        chunk_ids: Sequence[str],
+        *,
+        window: int,
+    ) -> dict[str, list[Chunk]]:
+        """批量读取命中 Chunk 及其有界相邻 Chunk，避免 Parent 扩展产生 N+1。
+
+        本方法只按文档和顺序读取事实，不决定哪些邻居属于同一语义 Parent。应用层会继续依据
+        ``parent_id`` 或旧数据的标题/来源边界过滤，并执行 Token 预算。返回字典保留每个命中
+        Chunk 的独立窗口，同一邻居可被多个命中共享。
+        """
+
+        if window < 0 or window > 3:
+            raise ValueError("window must be between 0 and 3")
+        unique_ids = tuple(dict.fromkeys(chunk_ids))
+        if not unique_ids:
+            return {}
+
+        async with self._session_factory() as session:
+            matched_rows = list(
+                await session.execute(
+                    select(ChunkModel, DocumentModel.knowledge_base_id, DocumentModel.filename)
+                    .join(DocumentModel, DocumentModel.id == ChunkModel.document_id)
+                    .where(ChunkModel.id.in_(unique_ids))
                 )
             )
-            return set(result)
+            matched = {
+                model.id: self._chunk(model, knowledge_base_id, filename)
+                for model, knowledge_base_id, filename in matched_rows
+            }
+            if not matched:
+                return {}
+
+            # 每个命中只展开最多 ``2 * window + 1`` 个顺序位置。条件在一条 SQL 中合并，
+            # top_k 最大 20、window 最大 3，因此不会生成无界 OR 或为每个 Hit 单独查询。
+            conditions = [
+                and_(
+                    ChunkModel.document_id == chunk.document_id,
+                    ChunkModel.chunk_index >= max(0, chunk.index - window),
+                    ChunkModel.chunk_index <= chunk.index + window,
+                )
+                for chunk in matched.values()
+            ]
+            neighbor_rows = list(
+                await session.execute(
+                    select(ChunkModel, DocumentModel.knowledge_base_id, DocumentModel.filename)
+                    .join(DocumentModel, DocumentModel.id == ChunkModel.document_id)
+                    .where(or_(*conditions))
+                    .order_by(ChunkModel.document_id, ChunkModel.chunk_index)
+                )
+            )
+            neighbors = [
+                self._chunk(model, knowledge_base_id, filename)
+                for model, knowledge_base_id, filename in neighbor_rows
+            ]
+
+        return {
+            chunk_id: [
+                neighbor
+                for neighbor in neighbors
+                if neighbor.document_id == chunk.document_id
+                and abs(neighbor.index - chunk.index) <= window
+            ]
+            for chunk_id, chunk in matched.items()
+        }
+
+    async def list_ready_chunks_page(
+        self,
+        *,
+        after_chunk_id: str | None = None,
+        limit: int = 500,
+        knowledge_base_id: str | None = None,
+    ) -> list[Chunk]:
+        """按稳定 Chunk ID 分页读取可回填派生索引的事实数据。
+
+        Keyset Pagination 不会随着页数增长产生 OFFSET 扫描；脚本在每批 Sparse Upsert 成功后
+        才推进游标，失败时可从上一稳定 ID 重新执行，Upsert 的稳定主键保证幂等。
+        """
+
+        if not 1 <= limit <= 2000:
+            raise ValueError("limit must be between 1 and 2000")
+        statement = (
+            select(ChunkModel, DocumentModel.knowledge_base_id, DocumentModel.filename)
+            .join(DocumentModel, DocumentModel.id == ChunkModel.document_id)
+            .where(DocumentModel.status == DocumentStatus.READY.value)
+            .order_by(ChunkModel.id)
+            .limit(limit)
+        )
+        if after_chunk_id is not None:
+            statement = statement.where(ChunkModel.id > after_chunk_id)
+        if knowledge_base_id is not None:
+            statement = statement.where(DocumentModel.knowledge_base_id == knowledge_base_id)
+
+        async with self._session_factory() as session:
+            rows = list(await session.execute(statement))
+        return [
+            self._chunk(model, row_knowledge_base_id, filename)
+            for model, row_knowledge_base_id, filename in rows
+        ]
 
     async def update_document_status(
         self,
@@ -442,6 +555,32 @@ class Repository:
             error_message=model.error_message,
             created_at=Repository._datetime(model.created_at),
             updated_at=Repository._datetime(model.updated_at),
+        )
+
+    @staticmethod
+    def _chunk(model: ChunkModel, knowledge_base_id: str, filename: str) -> Chunk:
+        """把 Chunk ORM 事实和所属文档字段恢复为完整领域对象。"""
+
+        # JSONB 来自本应用写入，但数据库仍是外部边界。复制后只把通过 JSON 类型约束的值
+        # 传入领域模型，并用 Document 表中的事实文件名覆盖可能缺失的旧版 metadata。
+        metadata = cast(dict[str, JsonValue], dict(model.chunk_metadata or {}))
+        metadata["filename"] = filename
+        raw_locator = metadata.get("source_locator")
+        locator = (
+            SourceLocator.from_metadata(cast(dict[str, object], raw_locator))
+            if isinstance(raw_locator, dict)
+            else SourceLocator(heading_path=tuple(model.heading_path or []))
+        )
+        return Chunk(
+            id=model.id,
+            knowledge_base_id=knowledge_base_id,
+            document_id=model.document_id,
+            index=model.chunk_index,
+            content=model.content,
+            heading_path=tuple(model.heading_path or []),
+            token_count=model.token_count,
+            locator=locator,
+            metadata=metadata,
         )
 
     @staticmethod

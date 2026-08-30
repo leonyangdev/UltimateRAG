@@ -1,6 +1,6 @@
 """核心可替换能力的最小端口协议。
 
-协议由应用层依赖、外围适配器实现；这里只描述当前 V2 真实需要的行为，不预设未来插件运行时。
+协议由应用层依赖、外围适配器实现；这里只描述当前 V3 真实需要的行为，不预设未来插件运行时。
 """
 
 from collections.abc import AsyncIterator, Sequence
@@ -11,6 +11,7 @@ from ultimate_rag.domain.models import (
     DocumentSource,
     EmbeddedChunk,
     ParsedDocument,
+    RerankResult,
     RetrievalResult,
 )
 
@@ -58,7 +59,11 @@ class VectorStore(Protocol):
         ...
 
     async def upsert(self, chunks: Sequence[EmbeddedChunk]) -> None:
-        """按稳定 Chunk ID 幂等写入向量和检索元数据。"""
+        """按稳定 Chunk ID 幂等写入 Dense 与 Sparse 派生索引。"""
+        ...
+
+    async def upsert_sparse(self, chunks: Sequence[Chunk]) -> None:
+        """只重建 BM25 索引，不重复调用计费 Embedding 服务。"""
         ...
 
     async def search(
@@ -66,8 +71,19 @@ class VectorStore(Protocol):
         query_vector: Sequence[float],
         knowledge_base_id: str,
         top_k: int,
+        document_ids: Sequence[str] = (),
     ) -> list[RetrievalResult]:
-        """在知识库过滤范围内执行相似度检索。"""
+        """在知识库与可选文档过滤范围内执行 Dense 相似度检索。"""
+        ...
+
+    async def search_sparse(
+        self,
+        query: str,
+        knowledge_base_id: str,
+        top_k: int,
+        document_ids: Sequence[str] = (),
+    ) -> list[RetrievalResult]:
+        """在相同业务范围内执行由原始文本驱动的 BM25 检索。"""
         ...
 
     async def delete_by_document(self, document_id: str) -> None:
@@ -112,6 +128,27 @@ class LLMClient(Protocol):
         流式能力属于模型端口而不是 HTTP 层：这样 Route 只负责把增量编码为传输协议，
         不需要知道 OpenAI-Compatible SDK 的 Chunk 结构，也不会用假逐字动画掩盖模型延迟。
         """
+        ...
+
+
+class QueryRewriter(Protocol):
+    """把含糊用户问题改写为至多一个更适合检索的查询。"""
+
+    async def rewrite(self, query: str) -> str | None:
+        """返回保留原意的替代查询；无需改写时返回 ``None``。"""
+        ...
+
+
+class Reranker(Protocol):
+    """使用查询与候选全文的相关性进行第二阶段排序。"""
+
+    async def rerank(
+        self,
+        query: str,
+        candidates: Sequence[RetrievalResult],
+        top_n: int,
+    ) -> list[RerankResult]:
+        """返回不超过 ``top_n`` 个候选 ID 与请求内相关性分数。"""
         ...
 
 

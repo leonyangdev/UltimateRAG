@@ -79,7 +79,10 @@ def create_processing_runtime(settings: Settings) -> ProcessingRuntime:
         uri=settings.milvus_uri,
         token=settings.milvus_token,
         collection=settings.milvus_collection,
+        sparse_collection=settings.milvus_sparse_collection,
         dimension=settings.embedding_dimension,
+        bm25_k1=settings.bm25_k1,
+        bm25_b=settings.bm25_b,
     )
     ocr = BailianOCRClient(
         api_key=settings.dashscope_api_key,

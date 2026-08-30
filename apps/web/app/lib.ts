@@ -54,6 +54,33 @@ export interface RetrievalResult {
   heading_path: string[];
   locator: SourceLocator | null;
   score: number;
+  dense_score: number | null;
+  sparse_score: number | null;
+  fusion_score: number | null;
+  rerank_score: number | null;
+  retrieval_sources: string[];
+  matched_content: string | null;
+  context_chunk_ids: string[];
+}
+
+export type RetrievalMode = "dense" | "sparse" | "hybrid";
+
+/** 一次 V3 Retrieval 的阶段执行结果，不包含 V5 在线链路追踪数据。 */
+export interface RetrievalTrace {
+  original_query: string;
+  query_variants: string[];
+  mode: RetrievalMode;
+  candidate_count: number;
+  result_count: number;
+  rewrite_applied: boolean;
+  rerank_applied: boolean;
+  parent_expansion_applied: boolean;
+  fallback_reasons: string[];
+}
+
+export interface RetrievalExplainResponse {
+  results: RetrievalResult[];
+  trace: RetrievalTrace;
 }
 
 export interface Citation {
@@ -62,6 +89,7 @@ export interface Citation {
   chunk_id: string;
   heading_path: string[];
   locator: SourceLocator | null;
+  context_chunk_ids: string[];
 }
 
 /** 把格式特有定位转换为用户可读短文本，顺序与后端 Prompt 保持一致。 */
@@ -80,6 +108,7 @@ export interface ChatResult {
   answer: string;
   citations: Citation[];
   retrieval_results: RetrievalResult[];
+  retrieval_trace: RetrievalTrace;
 }
 
 /**
@@ -90,6 +119,7 @@ export type RAGDataParts = {
   retrieval: {
     citations: Citation[];
     retrieval_results: RetrievalResult[];
+    retrieval_trace: RetrievalTrace;
   };
 };
 

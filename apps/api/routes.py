@@ -1,4 +1,4 @@
-"""UltimateRAG V2 HTTP 路由。
+"""UltimateRAG V3 HTTP 路由。
 
 模块职责：
     验证 HTTP 输入、调用应用服务，并把领域结果映射为普通 JSON 或 AI SDK UI Message Stream。
@@ -34,8 +34,10 @@ from api.schemas import (
     DocumentResponse,
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
+    RetrievalExplainResponse,
     RetrievalRequest,
     RetrievalResultResponse,
+    RetrievalTraceResponse,
 )
 from ultimate_rag.domain.exceptions import InvalidDocumentError
 
@@ -171,25 +173,54 @@ async def delete_document(document_id: str, request: Request) -> Response:
 
 @router.post("/retrieval/search", response_model=list[RetrievalResultResponse])
 async def search(payload: RetrievalRequest, request: Request) -> list[RetrievalResultResponse]:
-    """执行不依赖 LLM 的 Dense Retrieval，供效果调试和独立测试。"""
+    """执行 V3 Retrieval，并保留 V1/V2 的结果数组响应形状。"""
     await container(request).repository.get_knowledge_base(payload.knowledge_base_id)
     results = await container(request).retrieval.search(
-        payload.knowledge_base_id, payload.query, payload.top_k
+        payload.knowledge_base_id,
+        payload.query,
+        payload.top_k,
+        payload.to_options(container(request).retrieval_defaults),
     )
     return [RetrievalResultResponse.from_domain(result) for result in results]
+
+
+@router.post("/retrieval/explain", response_model=RetrievalExplainResponse)
+async def explain_retrieval(
+    payload: RetrievalRequest,
+    request: Request,
+) -> RetrievalExplainResponse:
+    """返回高级检索结果及 Query Rewrite、融合、重排和扩展执行情况。"""
+
+    dependencies = container(request)
+    await dependencies.repository.get_knowledge_base(payload.knowledge_base_id)
+    run = await dependencies.retrieval.retrieve(
+        payload.knowledge_base_id,
+        payload.query,
+        payload.top_k,
+        payload.to_options(dependencies.retrieval_defaults),
+    )
+    return RetrievalExplainResponse(
+        results=[RetrievalResultResponse.from_domain(result) for result in run.results],
+        trace=RetrievalTraceResponse.from_domain(run.trace),
+    )
 
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
     """执行完整 RAG 问答并返回答案、引用与召回证据。"""
     await container(request).repository.get_knowledge_base(payload.knowledge_base_id)
-    answer, citations, results = await container(request).rag.answer(
-        payload.knowledge_base_id, payload.query, payload.top_k
+    dependencies = container(request)
+    answer, citations, results, trace = await dependencies.rag.answer_with_trace(
+        payload.knowledge_base_id,
+        payload.query,
+        payload.top_k,
+        payload.to_options(dependencies.retrieval_defaults),
     )
     return ChatResponse(
         answer=answer,
         citations=[CitationResponse.from_domain(value) for value in citations],
         retrieval_results=[RetrievalResultResponse.from_domain(value) for value in results],
+        retrieval_trace=RetrievalTraceResponse.from_domain(trace),
     )
 
 
@@ -209,8 +240,12 @@ async def stream_chat(payload: ChatRequest, request: Request) -> StreamingRespon
     """
 
     await container(request).repository.get_knowledge_base(payload.knowledge_base_id)
-    answer_stream, citations, results = await container(request).rag.stream_answer(
-        payload.knowledge_base_id, payload.query, payload.top_k
+    dependencies = container(request)
+    answer_stream, citations, results, trace = await dependencies.rag.stream_answer_with_trace(
+        payload.knowledge_base_id,
+        payload.query,
+        payload.top_k,
+        payload.to_options(dependencies.retrieval_defaults),
     )
 
     # Evidence 在模型生成前已经稳定。通过自定义 data Part 与同一 assistant message 绑定，
@@ -222,6 +257,7 @@ async def stream_chat(payload: ChatRequest, request: Request) -> StreamingRespon
         "retrieval_results": [
             RetrievalResultResponse.from_domain(value).model_dump(mode="json") for value in results
         ],
+        "retrieval_trace": RetrievalTraceResponse.from_domain(trace).model_dump(mode="json"),
     }
     message_id = f"msg-{uuid4()}"
     text_id = f"text-{uuid4()}"

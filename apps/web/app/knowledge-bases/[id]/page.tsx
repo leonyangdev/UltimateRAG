@@ -176,7 +176,7 @@ export default function KnowledgeBaseWorkspacePage() {
             </h1>
             <Badge className="shrink-0 border-emerald-200 bg-emerald-50 text-sm text-emerald-700 shadow-none hover:bg-emerald-50">
               <span className="size-1 rounded-full bg-emerald-500" />
-              V2
+              V3
             </Badge>
           </div>
           <p className="mt-2 max-w-2xl text-base leading-7 text-muted-foreground">

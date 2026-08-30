@@ -4,14 +4,18 @@ API Schema 是外部数据验证边界，与内部领域 dataclass 分离，防�
 """
 
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ultimate_rag.domain.models import (
     Citation,
     Document,
     KnowledgeBase,
+    RetrievalMode,
+    RetrievalOptions,
     RetrievalResult,
+    RetrievalTrace,
     SourceLocator,
 )
 
@@ -110,15 +114,68 @@ class DocumentResponse(BaseModel):
 
 
 class RetrievalRequest(BaseModel):
-    """限定知识库、查询文本和召回数量的检索请求。"""
+    """限定业务范围，并允许逐请求覆盖 V3 检索策略。"""
 
-    knowledge_base_id: str
+    knowledge_base_id: str = Field(min_length=1, max_length=64)
     query: str = Field(min_length=1, max_length=4000)
     top_k: int = Field(default=5, ge=1, le=20)
+    mode: RetrievalMode | None = None
+    candidate_k: int | None = Field(default=None, ge=1, le=100)
+    enable_query_rewrite: bool | None = None
+    enable_rerank: bool | None = None
+    enable_parent_expansion: bool | None = None
+    document_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+        default_factory=list,
+        max_length=50,
+    )
+
+    @field_validator("knowledge_base_id", "query")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        """拒绝只含空白的业务标识和查询，并移除无语义的首尾空白。"""
+
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value cannot be blank")
+        return normalized
+
+    @field_validator("document_ids")
+    @classmethod
+    def normalize_document_ids(cls, values: list[str]) -> list[str]:
+        """在 HTTP 边界清理文档白名单，避免空 ID 到应用层才触发 500。"""
+
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("document_ids cannot contain blank values")
+        return normalized
+
+    def to_options(self, defaults: RetrievalOptions) -> RetrievalOptions:
+        """把可选 API 覆盖项与部署默认值合并为不可变领域配置。"""
+
+        # dict.fromkeys 在保留用户顺序的同时去重，避免相同 ID 放大 Milvus 过滤表达式。
+        document_ids = tuple(dict.fromkeys(self.document_ids))
+        return RetrievalOptions(
+            mode=self.mode or defaults.mode,
+            candidate_k=self.candidate_k or defaults.candidate_k,
+            enable_query_rewrite=(
+                defaults.enable_query_rewrite
+                if self.enable_query_rewrite is None
+                else self.enable_query_rewrite
+            ),
+            enable_rerank=(
+                defaults.enable_rerank if self.enable_rerank is None else self.enable_rerank
+            ),
+            enable_parent_expansion=(
+                defaults.enable_parent_expansion
+                if self.enable_parent_expansion is None
+                else self.enable_parent_expansion
+            ),
+            document_ids=document_ids,
+        )
 
 
 class RetrievalResultResponse(BaseModel):
-    """包含可追溯来源与余弦分数的检索命中。"""
+    """包含来源、最终分数和各检索阶段解释字段的命中。"""
 
     chunk_id: str
     document_id: str
@@ -127,6 +184,13 @@ class RetrievalResultResponse(BaseModel):
     heading_path: list[str]
     locator: SourceLocatorResponse | None
     score: float
+    dense_score: float | None
+    sparse_score: float | None
+    fusion_score: float | None
+    rerank_score: float | None
+    retrieval_sources: list[str]
+    matched_content: str | None
+    context_chunk_ids: list[str]
 
     @classmethod
     def from_domain(cls, value: RetrievalResult) -> "RetrievalResultResponse":
@@ -139,7 +203,51 @@ class RetrievalResultResponse(BaseModel):
             heading_path=list(value.heading_path),
             locator=SourceLocatorResponse.from_domain(value.locator),
             score=value.score,
+            dense_score=value.dense_score,
+            sparse_score=value.sparse_score,
+            fusion_score=value.fusion_score,
+            rerank_score=value.rerank_score,
+            retrieval_sources=list(value.retrieval_sources),
+            matched_content=value.matched_content,
+            context_chunk_ids=list(value.context_chunk_ids),
         )
+
+
+class RetrievalTraceResponse(BaseModel):
+    """面向 Retrieval Playground 的 V3 阶段说明。"""
+
+    original_query: str
+    query_variants: list[str]
+    mode: RetrievalMode
+    candidate_count: int
+    result_count: int
+    rewrite_applied: bool
+    rerank_applied: bool
+    parent_expansion_applied: bool
+    fallback_reasons: list[str]
+
+    @classmethod
+    def from_domain(cls, value: RetrievalTrace) -> "RetrievalTraceResponse":
+        """把不可变 Trace 转换为 JSON 列表结构。"""
+
+        return cls(
+            original_query=value.original_query,
+            query_variants=list(value.query_variants),
+            mode=value.mode,
+            candidate_count=value.candidate_count,
+            result_count=value.result_count,
+            rewrite_applied=value.rewrite_applied,
+            rerank_applied=value.rerank_applied,
+            parent_expansion_applied=value.parent_expansion_applied,
+            fallback_reasons=list(value.fallback_reasons),
+        )
+
+
+class RetrievalExplainResponse(BaseModel):
+    """V3 调试端点的结果信封；旧 ``/search`` 仍返回兼容数组。"""
+
+    results: list[RetrievalResultResponse]
+    trace: RetrievalTraceResponse
 
 
 class ChatRequest(RetrievalRequest):
@@ -157,6 +265,7 @@ class CitationResponse(BaseModel):
     chunk_id: str
     heading_path: list[str]
     locator: SourceLocatorResponse | None
+    context_chunk_ids: list[str]
 
     @classmethod
     def from_domain(cls, value: Citation) -> "CitationResponse":
@@ -167,15 +276,17 @@ class CitationResponse(BaseModel):
             chunk_id=value.chunk_id,
             heading_path=list(value.heading_path),
             locator=SourceLocatorResponse.from_domain(value.locator),
+            context_chunk_ids=list(value.context_chunk_ids),
         )
 
 
 class ChatResponse(BaseModel):
-    """答案、跨格式引用和基础检索调试信息的完整 V2 响应。"""
+    """答案、跨格式引用和高级检索解释信息的完整 V3 响应。"""
 
     answer: str
     citations: list[CitationResponse]
     retrieval_results: list[RetrievalResultResponse]
+    retrieval_trace: RetrievalTraceResponse
 
 
 class ErrorResponse(BaseModel):

@@ -1,6 +1,6 @@
 # Application 应用层
 
-代码位置：`src/ultimate_rag/application/services.py` 和 `context.py`
+代码位置：`src/ultimate_rag/application/services.py`、`retrieval.py` 和 `context.py`
 
 ## 1. 这一层是什么
 
@@ -14,7 +14,7 @@ Application 层是**业务工作流的编排者**：它不知道文件怎么解�
 |---|---|
 | `IngestionService` | 校验上传、存原文件、创建文档+任务（同步，返回 202） |
 | `DocumentProcessingService` | 后台处理管线：Parse → Chunk → Embed → Index（由 Worker 调用） |
-| `RetrievalService` | 独立检索：向量化查询 → 向量库检索 → READY 过滤 |
+| `RetrievalService` | 独立检索：事实过滤 → 改写 → Dense/BM25 → RRF → 重排 → Small2Big |
 | `RAGService` | 问答：检索 → 拼上下文 → LLM → 答案 + 引用 |
 | `DocumentLifecycleService` | 删除文档/知识库，协调三类存储清理 |
 | `ContextBuilder` | 把检索结果拼接成带来源编号的 LLM 上下文 |
@@ -108,26 +108,33 @@ async def process(self, document_id: str) -> Document:
 - **幂等**：稳定 Chunk ID + 文档级向量删除重建，重试结果一致
 - 失败时 `cleanup_partial_index()` 清理半成品向量（Milvus），保留 PostgreSQL 事实和 MinIO 原文件
 
-## 5. RetrievalService —— 检索
+## 5. RetrievalService —— 高级检索
 
 ### 职责
 
-「查询向量化 + 知识库范围内检索」，**不调用 LLM**，因此可以独立测试和调试。
+显式编排 `READY/Filter → Rewrite → Dense + Sparse → RRF → Rerank → Small2Big`。它不生成答案，
+因此检索质量、降级与 Metadata Filter 都能脱离 LLM 独立测试。
 
 ```python
-async def search(self, knowledge_base_id, query, top_k) -> list[RetrievalResult]:
-    # 查询必须沿用文档入库时的 Embedder（同一向量空间）
-    query_vector = await self._embedder.embed_query(query)
-
-    # 多取候选（top_k*3，最多60），再用 PostgreSQL READY 状态二次过滤
-    candidates = await self._vector_store.search(query_vector, knowledge_base_id, min(top_k * 3, 60))
-    ready_ids = await self._repository.list_ready_document_ids(knowledge_base_id)
-    return [r for r in candidates if r.document_id in ready_ids][:top_k]
+async def retrieve(self, knowledge_base_id, query, top_k, options):
+    ready_ids = await repository.list_ready_document_ids(
+        knowledge_base_id, options.document_ids)
+    variants = [query, optional_rewrite]
+    rankings = await dense_and_sparse_recall(variants, ready_ids)
+    candidates = reciprocal_rank_fusion(rankings, rank_constant=60)
+    results = await optional_rerank(query, candidates[:candidate_k], top_k)
+    results = await optional_parent_expansion(results)
+    return RetrievalRun(results=results, trace=trace)
 ```
 
 ### 关键设计
 
-- **二次过滤**：Milvus 是派生索引，写入与 READY 无法跨系统原子。多取候选再按事实过滤，可避免 Worker 崩溃时的半成品向量参与回答。
+- **事实约束**：文档白名单先与 PostgreSQL `READY` 求交并下推 Milvus，Hit 再二次过滤
+- **分数不混加**：COSINE/BM25 尺度不同，多个列表使用 RRF
+- **有界模型调用**：只保留一个改写和最多 100 个候选，默认候选宽度 30
+- **明确降级**：辅助阶段失败保留上一阶段结果并写入 Trace；所有召回失败则抛错
+- **取消传播**：客户端断开或服务关闭不能被误判为单通道失败
+- `search()` 保留旧数组接口，`retrieve()` 返回 `RetrievalRun(results, trace)`
 
 ## 6. RAGService —— 问答
 
@@ -148,9 +155,10 @@ async def search(self, knowledge_base_id, query, top_k) -> list[RetrievalResult]
 ```python
 async def _prepare_generation(self, knowledge_base_id, question, top_k):
     # 阶段 1 — Retrieve：没有证据就跳过付费 LLM，防止模型编造不可追溯答案
-    results = await self._retrieval.search(knowledge_base_id, question, top_k)
+    run = await self._retrieval.retrieve(knowledge_base_id, question, top_k, options)
+    results = list(run.results)
     if not results:
-        return None, [], []
+        return None, [], [], run.trace
 
     # 阶段 2 — Build Context：确定性编号、拼接证据（字符预算内）
     context = self._context_builder.build(results)
@@ -160,7 +168,7 @@ async def _prepare_generation(self, knowledge_base_id, question, top_k):
 
     # 阶段 3 — Cite：Citation 从受控 RetrievalResult 构造，不解析 LLM 自由文本
     citations = [Citation(...) for result in results]
-    return user_prompt, citations, results
+    return user_prompt, citations, results, run.trace
 ```
 
 ### 关键设计

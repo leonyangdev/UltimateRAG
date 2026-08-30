@@ -37,6 +37,7 @@ export default defineConfig({
           text: "UltimateRAG 概览",
           items: [
             { text: "项目定位与版本演进", link: "/guide/project-overview" },
+            { text: "V3 能力与限制", link: "/guide/v3-capabilities" },
             { text: "V2 能力与限制", link: "/guide/v2-capabilities" },
           ],
         },
@@ -67,6 +68,7 @@ export default defineConfig({
             { text: "Chunker 切块器", link: "/modules/chunker" },
             { text: "Embedding 向量化", link: "/modules/embeddings" },
             { text: "VectorStore 向量库", link: "/modules/vectorstore" },
+            { text: "Retrieval 高级检索", link: "/modules/retrieval" },
             { text: "Generation 生成", link: "/modules/generation" },
             { text: "Worker 后台任务", link: "/modules/worker" },
             { text: "Infrastructure 基础设施", link: "/modules/infrastructure" },

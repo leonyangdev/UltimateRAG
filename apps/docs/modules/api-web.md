@@ -36,7 +36,12 @@ async def lifespan(app: FastAPI):
 
     # 阶段 2：LLM 只属于 HTTP 问答进程；后台 Worker 不创建生成模型客户端
     llm = BailianLLMClient(...)
-    retrieval = RetrievalService(runtime.embedder, runtime.vector_store, runtime.repository)
+    retrieval = RetrievalService(
+        runtime.embedder, runtime.vector_store, runtime.repository,
+        query_rewriter=BailianQueryRewriter(...),
+        reranker=BailianReranker(...),
+        default_options=RetrievalOptions(mode=RetrievalMode.HYBRID, ...),
+    )
 
     # 阶段 3：集中放入进程级 Container，Route 只从 app.state 取服务
     app.state.container = Container(
@@ -88,6 +93,7 @@ DELETE /api/documents/{doc_id}                   → 204 删除
 
 ```text
 POST   /api/retrieval/search                     → 纯检索（不依赖 LLM，可独立调试）
+POST   /api/retrieval/explain                    → 结果 + V3 阶段 Trace
 POST   /api/chat                                 → 完整问答（答案 + 引用 + 召回证据）
 POST   /api/chat/stream                          → SSE 流式问答（AI SDK UI Message Stream）
 GET    /api/health                               → 存活检查（不触发模型调用）
@@ -111,14 +117,14 @@ async def _read_bounded_upload(file, max_upload_bytes) -> bytes:
 使用 **AI SDK Data Stream Protocol** 的 SSE 表示：
 
 ```text
-start → start-step → data-retrieval（引用+证据随同一条消息）→ text-start
+start → start-step → data-retrieval（引用+证据+Trace 随同一条消息）→ text-start
      → text-delta × N → text-end → finish-step → finish → [DONE]
 ```
 
 关键点：
 
 - **检索在 StreamingResponse 建立前完成**：知识库不存在、Embedding 失败、Milvus 不可用时，仍能返回结构化 HTTP 状态码
-- **Citation/RetrievalResult 通过有类型的 `data-retrieval` Part 同消息返回**：前端不需要在流结束后再发请求补取证据
+- **Citation/RetrievalResult/RetrievalTrace 通过有类型的 `data-retrieval` Part 同消息返回**：前端不需要在流结束后再发请求补取证据
 - LLM 在响应开始后的故障只能编码为 `error` Part（此时 200 已发出），日志保留完整堆栈，浏览器只收到稳定文案
 - 响应头：
   - `X-Accel-Buffering: no`：关闭 Nginx 缓冲，让 token 及时抵达
@@ -136,6 +142,8 @@ ChatRequest(RetrievalRequest):
 - 外部字段用产品语义的 `question`，内部统一 `query`
 - `from_domain()` 类方法负责领域对象 → API 结构的显式映射
 - `RetrievalRequest.top_k`：`ge=1, le=20` 边界校验
+- `candidate_k` 最大 100，`document_ids` 最大 50；空白 Query/ID 在 HTTP 边界拒绝
+- 模式与可选阶段可逐请求覆盖部署默认值
 
 ## 第二部分：前端（Next.js）
 

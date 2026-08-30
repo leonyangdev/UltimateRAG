@@ -1,0 +1,57 @@
+"""验证 V3 检索 API 的边界清洗和领域配置映射。"""
+
+import pytest
+from api.schemas import ChatRequest, RetrievalRequest
+from pydantic import ValidationError
+
+from ultimate_rag.domain.models import RetrievalMode, RetrievalOptions
+
+
+def test_retrieval_request_normalizes_and_deduplicates_document_filter() -> None:
+    """首尾空白不应进入 Milvus 表达式，重复 ID 不应放大过滤条件。"""
+
+    request = RetrievalRequest(
+        knowledge_base_id="  kb-1 ",
+        query="  BM25 是什么？  ",
+        document_ids=[" doc-1 ", "doc-1", "doc-2"],
+    )
+    options = request.to_options(
+        RetrievalOptions(
+            mode=RetrievalMode.DENSE,
+            candidate_k=12,
+            enable_query_rewrite=False,
+            enable_rerank=False,
+            enable_parent_expansion=False,
+        )
+    )
+
+    assert request.knowledge_base_id == "kb-1"
+    assert request.query == "BM25 是什么？"
+    assert options.document_ids == ("doc-1", "doc-2")
+    assert options.mode is RetrievalMode.DENSE
+    assert options.candidate_k == 12
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("knowledge_base_id", "  "), ("query", "\t\n"), ("document_ids", [" "])],
+)
+def test_retrieval_request_rejects_blank_values(field: str, value: object) -> None:
+    """空白输入必须在 Pydantic HTTP 边界变成 422，而不是应用层 ValueError/500。"""
+
+    payload: dict[str, object] = {
+        "knowledge_base_id": "kb-1",
+        "query": "query",
+        "document_ids": [],
+    }
+    payload[field] = value
+    with pytest.raises(ValidationError):
+        RetrievalRequest.model_validate(payload)
+
+
+def test_chat_request_keeps_question_alias_and_inherited_validation() -> None:
+    """Chat 继续接受公开的 question 字段，并继承查询空白清洗。"""
+
+    request = ChatRequest(knowledge_base_id="kb-1", question="  查询内容  ")
+
+    assert request.query == "查询内容"

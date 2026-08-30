@@ -49,7 +49,7 @@ export default function Home() {
         </h1>
 
         <p className="mx-auto mt-7 max-w-2xl text-pretty text-lg leading-8 text-muted-foreground sm:text-xl">
-          从 Markdown 原文、语义切块到 Dense Retrieval 与流式生成，完整保留每一次回答的证据链。
+          从多格式文档智能、Dense + BM25 混合检索到重排与流式生成，完整保留每一次回答的证据链。
         </p>
 
         <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
@@ -93,7 +93,7 @@ export default function Home() {
           {[
             [Database, "PostgreSQL", "业务事实、文档状态与 Chunk 元数据", "文档是否可检索、属于哪个知识库，都以这里记录的事实为准。"],
             [FileSearch, "MinIO", "可排查、可重建的原始文档事实", "用户上传的原文原样保存，即使处理失败也能据此排查或重新索引。"],
-            [Sparkles, "Milvus", "按知识库隔离的可重建向量索引", "只保存派生的向量数据，可以随时删除并用事实数据重建。"],
+            [Sparkles, "Milvus", "按知识库隔离的 Dense + BM25 索引", "只保存可重建的派生索引，语义召回与精确词召回可以独立解释。"],
           ].map(([Icon, title, copy, detail]) => {
             const ArchitectureIcon = Icon as typeof Database;
             return (

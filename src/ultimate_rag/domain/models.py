@@ -50,6 +50,14 @@ class BlockType(StrEnum):
     IMAGE = "IMAGE"
 
 
+class RetrievalMode(StrEnum):
+    """V3 对外提供的检索策略；模式只决定召回通道，不绑定具体向量库。"""
+
+    DENSE = "dense"
+    SPARSE = "sparse"
+    HYBRID = "hybrid"
+
+
 @dataclass(frozen=True, slots=True)
 class SourceLocator:
     """跨文档格式的来源位置，供 Chunk、检索结果和 Citation 统一复用。
@@ -184,8 +192,41 @@ class EmbeddedChunk:
 
 
 @dataclass(frozen=True, slots=True)
+class RetrievalOptions:
+    """一次检索请求的高级策略与安全过滤条件。
+
+    ``top_k`` 仍由服务方法显式接收，因为它描述调用方需要多少最终结果；``candidate_k``
+    则描述进入融合/重排的召回宽度。二者分开后，可以扩大候选池而不把全部候选塞进 LLM。
+    """
+
+    mode: RetrievalMode = RetrievalMode.HYBRID
+    candidate_k: int = 30
+    enable_query_rewrite: bool = True
+    enable_rerank: bool = True
+    enable_parent_expansion: bool = True
+    document_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """拒绝绕过 API Schema 直接调用应用服务时传入的无界参数。"""
+
+        if not isinstance(self.mode, RetrievalMode):
+            raise ValueError("mode must be a RetrievalMode")
+        if not 1 <= self.candidate_k <= 100:
+            raise ValueError("candidate_k must be between 1 and 100")
+        if len(self.document_ids) > 50:
+            raise ValueError("document_ids cannot contain more than 50 values")
+        if any(not value.strip() for value in self.document_ids):
+            raise ValueError("document_ids cannot contain empty values")
+
+
+@dataclass(frozen=True, slots=True)
 class RetrievalResult:
-    """向量检索命中结果，保留答案引用所需的完整来源信息。"""
+    """高级检索命中结果，保留各阶段分数与最终上下文来源。
+
+    ``score`` 始终表示当前排序实际使用的最终分数；它可能来自 Dense、BM25、RRF 或
+    Reranker，因此不能跨模式、跨查询直接比较。各阶段原始分数使用独立可选字段保留，
+    Retrieval Playground 可以据此解释排序变化，而不需要了解 Milvus SDK 的响应结构。
+    """
 
     chunk_id: str
     knowledge_base_id: str
@@ -195,6 +236,44 @@ class RetrievalResult:
     heading_path: tuple[str, ...]
     score: float
     locator: SourceLocator | None = None
+    dense_score: float | None = None
+    sparse_score: float | None = None
+    fusion_score: float | None = None
+    rerank_score: float | None = None
+    retrieval_sources: tuple[str, ...] = ()
+    matched_content: str | None = None
+    context_chunk_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RerankResult:
+    """Reranker 返回的最小稳定结果，避免供应商响应结构进入应用层。"""
+
+    chunk_id: str
+    score: float
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalTrace:
+    """一次高级检索的轻量解释信息，不承担 V5 全链路可观测性职责。"""
+
+    original_query: str
+    query_variants: tuple[str, ...]
+    mode: RetrievalMode
+    candidate_count: int
+    result_count: int
+    rewrite_applied: bool
+    rerank_applied: bool
+    parent_expansion_applied: bool
+    fallback_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalRun:
+    """高级检索结果与其解释信息的组合，供调试 API 和 RAG 生成共同复用。"""
+
+    results: tuple[RetrievalResult, ...]
+    trace: RetrievalTrace
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +285,7 @@ class Citation:
     chunk_id: str
     heading_path: tuple[str, ...]
     locator: SourceLocator | None = None
+    context_chunk_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

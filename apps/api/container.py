@@ -13,6 +13,7 @@ from ultimate_rag.application import (
     RAGService,
     RetrievalService,
 )
+from ultimate_rag.domain.models import RetrievalOptions
 from ultimate_rag.infrastructure.database.repository import Repository
 
 
@@ -25,5 +26,6 @@ class Container:
     repository: Repository
     ingestion: IngestionService
     retrieval: RetrievalService
+    retrieval_defaults: RetrievalOptions
     rag: RAGService
     lifecycle: DocumentLifecycleService

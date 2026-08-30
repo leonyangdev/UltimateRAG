@@ -94,19 +94,26 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
 
 ### `POST /api/retrieval/search` → 200
 
-纯 Dense Retrieval，**不调用 LLM**，可独立调试检索效果。
+执行 V3 Retrieval，**不调用答案生成 LLM**。为兼容 V1/V2 客户端仍返回结果数组；未提供高级
+字段时使用部署默认值（Hybrid + Rewrite + Rerank + Small2Big）。
 
 ```json
 // 请求
 {
   "knowledge_base_id": "kb-1",
   "query": "什么是 RAG",
-  "top_k": 5
+  "top_k": 5,
+  "mode": "hybrid",
+  "candidate_k": 30,
+  "enable_query_rewrite": true,
+  "enable_rerank": true,
+  "enable_parent_expansion": true,
+  "document_ids": ["optional-doc-id"]
 }
 ```
 
 ```json
-// 响应：按相似度降序
+// 响应：按最终阶段分数降序
 [
   {
     "chunk_id": "chunk-abc",
@@ -115,12 +122,43 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
     "content": "检索增强生成（RAG）...",
     "heading_path": ["RAG", "什么是 RAG"],
     "locator": { "heading_path": ["RAG"], "page": 2, "bbox": null, "sheet": null, "cell_range": null, "slide": null },
-    "score": 0.87
+    "score": 0.91,
+    "dense_score": 0.87,
+    "sparse_score": 8.42,
+    "fusion_score": 0.0325,
+    "rerank_score": 0.91,
+    "retrieval_sources": ["dense:original", "sparse:original"],
+    "matched_content": "检索增强生成（RAG）...",
+    "context_chunk_ids": ["chunk-before", "chunk-abc"]
   }
 ]
 ```
 
-字段校验：`query` 1–4000 字符，`top_k` 1–20。
+字段校验：非空 `query` 最多 4000 字符，`top_k` 1–20，`candidate_k` 1–100，`document_ids`
+最多 50 个。`mode` 只能是 `dense`、`sparse` 或 `hybrid`。
+
+### `POST /api/retrieval/explain` → 200
+
+请求与 `/retrieval/search` 相同，响应增加阶段 Trace，推荐 Retrieval Playground 和调参工具使用：
+
+```json
+{
+  "results": [{ "chunk_id": "chunk-abc", "score": 0.91 }],
+  "trace": {
+    "original_query": "什么是 RAG",
+    "query_variants": ["什么是 RAG", "检索增强生成 RAG 定义"],
+    "mode": "hybrid",
+    "candidate_count": 18,
+    "result_count": 5,
+    "rewrite_applied": true,
+    "rerank_applied": true,
+    "parent_expansion_applied": true,
+    "fallback_reasons": []
+  }
+}
+```
+
+`fallback_reasons` 非空表示发生了明确降级；它不是 V5 的持久化全链路 Trace。
 
 ### `POST /api/chat` → 200
 
@@ -148,7 +186,8 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
   ],
   "retrieval_results": [
     { "chunk_id": "chunk-abc", "document_id": "doc-123", "filename": "rag-intro.md", "content": "...", "heading_path": ["RAG"], "locator": null, "score": 0.87 }
-  ]
+  ],
+  "retrieval_trace": { "mode": "hybrid", "candidate_count": 18, "result_count": 5, "fallback_reasons": [] }
 }
 ```
 
@@ -161,7 +200,7 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
 ```text
 data: {"type":"start","messageId":"msg-..."}
 data: {"type":"start-step"}
-data: {"type":"data-retrieval","data":{"citations":[...],"retrieval_results":[...]}}
+data: {"type":"data-retrieval","data":{"citations":[...],"retrieval_results":[...],"retrieval_trace":{...}}}
 data: {"type":"text-start","id":"text-..."}
 data: {"type":"text-delta","id":"text-...","delta":"根据"}
 data: {"type":"text-delta","id":"text-...","delta":"当前知识库"}
@@ -201,11 +240,14 @@ x-vercel-ai-ui-message-stream: v1     # AI SDK 识别标记
 
 | 字段 | 说明 |
 |---|---|
-| `status` | 文档处理状态：`pending`/`parsing`/`chunking`/`embedding`/`indexing`/`ready`/`failed` |
+| `status` | 文档处理状态：`PENDING`/`PARSING`/`CHUNKING`/`EMBEDDING`/`INDEXING`/`READY`/`FAILED` |
 | `error_message` | 失败或重试中的可读说明 |
 | `parser_name` / `parser_version` | 实际使用的解析器 |
 | `locator` | 跨格式原文位置；不同文档类型只填适用字段 |
-| `score` | COSINE 相似度（与建库时同一 Embedding 模型才有语义可比性） |
+| `score` | 当前最终排序所用分数；可能来自 Dense、BM25、RRF 或 Rerank，不能跨请求比较 |
+| `dense_score` / `sparse_score` | 各召回通道原始分数 |
+| `fusion_score` / `rerank_score` | 融合与二阶段重排分数；未执行阶段为 `null` |
+| `context_chunk_ids` | Small2Big 实际进入上下文的 Child ID；Citation 仍锚定命中 `chunk_id` |
 
 ## 下一步
 

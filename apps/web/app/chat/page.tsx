@@ -14,6 +14,7 @@ import {
   MessageSquare,
   Search,
   Send,
+  SlidersHorizontal,
   Square,
 } from "lucide-react";
 
@@ -23,7 +24,10 @@ import {
   DocumentItem,
   KnowledgeBase,
   RAGMessage as RAGMessageType,
+  RetrievalExplainResponse,
+  RetrievalMode,
   RetrievalResult,
+  RetrievalTrace,
 } from "@/app/lib";
 import { RAGMessage } from "@/components/rag-message";
 import { RetrievalEvidence } from "@/components/retrieval-evidence";
@@ -77,6 +81,12 @@ export default function ChatPage() {
   const [loadedForId, setLoadedForId] = useState<string | null>(null);
   const [question, setQuestion] = useState("");
   const [retrievalResults, setRetrievalResults] = useState<RetrievalResult[]>([]);
+  const [retrievalTrace, setRetrievalTrace] = useState<RetrievalTrace | null>(null);
+  const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("hybrid");
+  const [enableQueryRewrite, setEnableQueryRewrite] = useState(true);
+  const [enableRerank, setEnableRerank] = useState(true);
+  const [enableParentExpansion, setEnableParentExpansion] = useState(true);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
   const [mode, setMode] = useState<Mode>("chat");
   const [pageError, setPageError] = useState("");
   const [isLoadingKnowledgeBases, setIsLoadingKnowledgeBases] = useState(true);
@@ -102,7 +112,8 @@ export default function ChatPage() {
 
   const isChatWorking = chatStatus === "submitted" || chatStatus === "streaming";
   const hasReadyDocument = documents.some((document) => document.status === "READY");
-  const readyCount = documents.filter((document) => document.status === "READY").length;
+  const readyDocuments = documents.filter((document) => document.status === "READY");
+  const readyCount = readyDocuments.length;
   const selectedKnowledgeBase = knowledgeBases.find((base) => base.id === selectedId) ?? null;
   // 选中了知识库但文档列表还不属于它，说明正在加载；未选中时无需加载。
   const isLoadingDocuments = selectedId !== null && loadedForId !== selectedId;
@@ -138,6 +149,11 @@ export default function ChatPage() {
       .then((values) => {
         if (!isActive) return;
         setDocuments(values);
+        // 文档删除或重新处理后移除已经不再 READY 的过滤项，防止隐藏的旧 ID 让检索返回空集。
+        const readyIds = new Set(
+          values.filter((document) => document.status === "READY").map((document) => document.id),
+        );
+        setSelectedDocumentIds((current) => current.filter((id) => readyIds.has(id)));
         setLoadedForId(selectedId);
       })
       .catch((value: unknown) => {
@@ -172,6 +188,8 @@ export default function ChatPage() {
     if (isChatWorking) stop();
     setSelectedId(id);
     setRetrievalResults([]);
+    setRetrievalTrace(null);
+    setSelectedDocumentIds([]);
     setPageError("");
   }
 
@@ -181,24 +199,46 @@ export default function ChatPage() {
     const normalizedQuestion = question.trim();
     if (!normalizedQuestion || !selectedId || !hasReadyDocument) return;
     setPageError("");
+    const retrievalOptions = {
+      mode: retrievalMode,
+      candidate_k: 30,
+      enable_query_rewrite: enableQueryRewrite,
+      enable_rerank: enableRerank,
+      enable_parent_expansion: enableParentExpansion,
+      document_ids: selectedDocumentIds,
+    };
 
     if (mode === "chat") {
       setQuestion("");
       await sendMessage(
         { text: normalizedQuestion },
-        { body: { knowledge_base_id: selectedId, question: normalizedQuestion, top_k: 5 } },
+        {
+          body: {
+            knowledge_base_id: selectedId,
+            question: normalizedQuestion,
+            top_k: 5,
+            ...retrievalOptions,
+          },
+        },
       );
       return;
     }
 
     setIsRetrieving(true);
     setRetrievalResults([]);
+    setRetrievalTrace(null);
     try {
-      const results = await api<RetrievalResult[]>("/api/retrieval/search", {
+      const response = await api<RetrievalExplainResponse>("/api/retrieval/explain", {
         method: "POST",
-        body: JSON.stringify({ knowledge_base_id: selectedId, query: normalizedQuestion, top_k: 5 }),
+        body: JSON.stringify({
+          knowledge_base_id: selectedId,
+          query: normalizedQuestion,
+          top_k: 5,
+          ...retrievalOptions,
+        }),
       });
-      setRetrievalResults(results);
+      setRetrievalResults(response.results);
+      setRetrievalTrace(response.trace);
     } catch (value) {
       setPageError(value instanceof Error ? value.message : "检索失败");
     } finally {
@@ -216,21 +256,99 @@ export default function ChatPage() {
   return (
     <div className="flex h-[calc(100dvh-4rem)] flex-col">
       {/* ─── 顶部工具栏：模式切换 ─── */}
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/70 bg-card/60 px-4 py-2.5 backdrop-blur-sm">
-        <Tabs value={mode} onValueChange={(value) => setMode(value as Mode)}>
-          <TabsList>
-            <TabsTrigger value="chat">
-              <MessageSquare className="size-3.5" /> RAG 问答
-            </TabsTrigger>
-            <TabsTrigger value="retrieval">
-              <Search className="size-3.5" /> 检索调试
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
+      <div className="shrink-0 space-y-2 border-b border-border/70 bg-card/60 px-4 py-2.5 backdrop-blur-sm">
+        <div className="flex items-center justify-between gap-3">
+          <Tabs value={mode} onValueChange={(value) => setMode(value as Mode)}>
+            <TabsList>
+              <TabsTrigger value="chat">
+                <MessageSquare className="size-3.5" /> RAG 问答
+              </TabsTrigger>
+              <TabsTrigger value="retrieval">
+                <Search className="size-3.5" /> 检索调试
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
 
-        <p className="hidden text-sm text-muted-foreground sm:block">
-          {mode === "chat" ? "回答与证据将通过同一条流返回" : "仅执行 Embedding + Milvus Search"}
-        </p>
+          <p className="hidden text-sm text-muted-foreground sm:block">
+            {mode === "chat" ? "回答与证据通过同一条流返回" : "观察召回、融合、重排与上下文扩展"}
+          </p>
+        </div>
+
+        {/* 高级检索配置同时作用于问答和独立调试。保持原生表单控件可以直接获得键盘、
+            屏幕阅读器和移动端行为，不为少量布尔选项引入新的表单框架。 */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+          <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
+            <SlidersHorizontal className="size-3.5 text-primary" /> 检索策略
+          </span>
+          <select
+            value={retrievalMode}
+            onChange={(event) => setRetrievalMode(event.target.value as RetrievalMode)}
+            aria-label="选择检索模式"
+            className="h-8 rounded-md border border-border bg-background px-2 outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+          >
+            <option value="hybrid">Hybrid（Dense + BM25）</option>
+            <option value="dense">Dense</option>
+            <option value="sparse">Sparse / BM25</option>
+          </select>
+          <label className="inline-flex cursor-pointer items-center gap-1.5 text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={enableQueryRewrite}
+              onChange={(event) => setEnableQueryRewrite(event.target.checked)}
+              className="accent-primary"
+            />
+            查询改写
+          </label>
+          <label className="inline-flex cursor-pointer items-center gap-1.5 text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={enableRerank}
+              onChange={(event) => setEnableRerank(event.target.checked)}
+              className="accent-primary"
+            />
+            Rerank
+          </label>
+          <label className="inline-flex cursor-pointer items-center gap-1.5 text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={enableParentExpansion}
+              onChange={(event) => setEnableParentExpansion(event.target.checked)}
+              className="accent-primary"
+            />
+            Small2Big
+          </label>
+          {readyDocuments.length > 0 && (
+            <details className="relative">
+              <summary className="cursor-pointer list-none rounded-md border border-border bg-background px-2.5 py-1.5 text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
+                文档过滤：{selectedDocumentIds.length === 0 ? "全部" : `${selectedDocumentIds.length} 份`}
+              </summary>
+              <div className="absolute right-0 z-20 mt-1 max-h-56 w-72 space-y-1 overflow-y-auto rounded-lg border border-border bg-popover p-2 shadow-lg">
+                {readyDocuments.map((document) => (
+                  <label
+                    key={document.id}
+                    className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedDocumentIds.includes(document.id)}
+                      onChange={(event) =>
+                        setSelectedDocumentIds((current) =>
+                          event.target.checked
+                            ? [...current, document.id]
+                            : current.filter((id) => id !== document.id),
+                        )
+                      }
+                      className="accent-primary"
+                    />
+                    <span className="truncate" title={document.filename}>
+                      {document.filename}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
       </div>
 
       {/* 错误提示 */}
@@ -322,22 +440,23 @@ export default function ChatPage() {
           </div>
         ) : (
           <div className="mx-auto max-w-3xl">
-            {retrievalResults.length === 0 && !isRetrieving ? (
+            {retrievalResults.length === 0 && !isRetrieving && !retrievalTrace ? (
               <div className="flex h-full min-h-[320px] flex-col items-center justify-center text-center">
                 <span className="grid size-14 place-items-center rounded-2xl border border-border bg-card shadow-sm">
                   <Search className="size-6 text-primary" />
                 </span>
                 <h2 className="mt-5 text-2xl font-semibold tracking-tight">观察召回，而不调用 LLM</h2>
                 <p className="mt-3 max-w-md text-base leading-7 text-muted-foreground">
-                  选择知识库后输入查询，查看 Top-5 Chunk、原文位置和余弦相似度，用于单独评估 Retrieval 效果。
+                  选择知识库后输入查询，查看 Dense/BM25 召回、RRF 融合、Rerank 分数和
+                  Small2Big 上下文，用于单独评估 Retrieval 效果。
                 </p>
               </div>
             ) : isRetrieving ? (
               <div className="flex h-full min-h-[320px] items-center justify-center gap-3 text-sm text-muted-foreground">
-                <LoaderCircle className="size-4 animate-spin text-primary" /> 正在编码查询并检索向量…
+                <LoaderCircle className="size-4 animate-spin text-primary" /> 正在执行高级检索管线…
               </div>
             ) : (
-              <RetrievalEvidence results={retrievalResults} defaultOpen />
+              <RetrievalEvidence results={retrievalResults} trace={retrievalTrace} defaultOpen />
             )}
           </div>
         )}

@@ -8,7 +8,7 @@
 |---|---|---|
 | **PostgreSQL** | 业务**事实**数据 | 事实来源（Source of Truth） |
 | **MinIO** | **原始文件** | 对象存储 |
-| **Milvus** | **向量索引** | 派生索引（Derived Index） |
+| **Milvus** | **Dense 向量与 BM25 稀疏索引** | 派生索引（Derived Index） |
 
 ```text
 事实数据 + 原文件
@@ -45,21 +45,27 @@ chunks            Chunk 事实（文本 + 元数据 + 来源定位）
 - 先存原文件再建业务记录：即使处理失败，也能用原文件排查或重建
 - 用户文件名只用于展示和扩展名判断
 
-## 4. Milvus —— 派生向量索引
+## 4. Milvus —— Dense + Sparse 派生索引
 
 只保存**可重建的向量索引和检索数据**，不保存业务状态。
 
-Collection：`knowledge_chunks`，核心字段：
+V3 使用两个可独立重建的 Collection：
+
+- `knowledge_chunks`：V1/V2 延续的 Dense COSINE 索引
+- `knowledge_chunks_sparse_v3`：原文经 `jieba + lowercase` 分析后，由 Milvus BM25 Function 本地生成的 Sparse 索引
+
+两者共享的核心字段：
 
 ```text
 id                 主键（Chunk 稳定 ID，幂等写入）
 knowledge_base_id  检索隔离边界
 document_id / chunk_id
 filename / content / heading_path   检索展示与 Citation
-embedding          1024 维 FloatVector（COSINE 距离）
+embedding / sparse_embedding   Dense FloatVector 或 BM25 SparseFloatVector
 ```
 
-索引策略：`AUTOINDEX` + `COSINE`，`Strong` 一致性（保证 READY 后立即可检索、删除后立即不可见）。
+Dense 使用 `AUTOINDEX + COSINE`；Sparse 使用 `SPARSE_INVERTED_INDEX + BM25`。两者均使用
+`Strong` 一致性，保证 READY 后立即可检索、删除后立即不可见。
 
 ## 5. 写路径与读路径
 
@@ -75,7 +81,7 @@ Worker 处理：
    ↓
 PostgreSQL 写 Chunk 事实（事务）
    ↓
-Milvus 写向量（delete_by_document + upsert + flush）
+Milvus 顺序写 Dense 与 Sparse（delete_by_document + upsert + flush）
    ↓
 PostgreSQL 标记 READY（最后一步）
 ```
@@ -83,9 +89,9 @@ PostgreSQL 标记 READY（最后一步）
 ### 读取时（Query）
 
 ```text
-用户提问 → 向量化
+用户提问 → 可选改写 → Dense 与 BM25 并发召回（限定知识库/文档）
    ↓
-Milvus 检索候选（限定知识库）
+RRF 融合 → Rerank → Small2Big
    ↓
 PostgreSQL 二次过滤（只留 READY 文档）
    ↓
@@ -102,7 +108,7 @@ PostgreSQL 二次过滤（只留 READY 文档）
 3. 最后删 PostgreSQL 事实
 ```
 
-为什么最后删 PostgreSQL？因为前两步失败时，PostgreSQL 事实记录仍然存在，运维可以根据它知道**还要清理哪些外部资源**。这是「明确失败状态 + 补偿操作」思想的体现，V2 不做跨存储事务。
+为什么最后删 PostgreSQL？因为前两步失败时，PostgreSQL 事实记录仍然存在，运维可以根据它知道**还要清理哪些外部资源**。这是「明确失败状态 + 补偿操作」思想的体现，V3 不做跨存储事务。
 
 ## 7. 为什么不让 Milvus 当事实来源
 

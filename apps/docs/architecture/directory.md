@@ -60,7 +60,8 @@ src/ultimate_rag/
 │   └── exceptions.py        #   业务异常
 │
 ├── application/             # ★ 应用层：显式业务工作流
-│   ├── services.py          #   五大服务：Ingestion/Processing/Retrieval/RAG/Lifecycle
+│   ├── services.py          #   Ingestion/Processing/RAG/Lifecycle
+│   ├── retrieval.py         #   V3 高级检索显式流水线
 │   └── context.py           #   ContextBuilder（拼上下文）
 │
 ├── infrastructure/          # ★ 基础设施实现
@@ -87,7 +88,14 @@ src/ultimate_rag/
 │   └── bailian.py           #   BailianEmbedder（百炼 text-embedding-v4）
 │
 ├── vectorstores/
-│   └── milvus.py            #   MilvusVectorStore
+│   └── milvus.py            #   MilvusVectorStore（Dense + BM25）
+│
+├── retrieval/
+│   ├── bailian.py           #   Query Rewrite / Reranker 适配器
+│   └── fusion.py            #   纯函数 RRF
+│
+├── evaluation/
+│   └── retrieval.py         #   Precision/Recall/MRR/nDCG
 │
 ├── generation/
 │   └── bailian.py           #   BailianLLMClient（百炼 qwen-plus）
@@ -117,11 +125,14 @@ docs/
 ├── 2.technical_architecture.md       # 技术架构
 ├── 3.v1_implementation.md            # V1 实现说明
 ├── 4.v2_implementation.md            # V2 实现说明
-└── adr/ADR-001-...md                 # 架构决策记录
+├── 5.v3_implementation.md            # V3 实现说明
+└── adr/ADR-002-...md                 # Hybrid Retrieval 架构决策
 
 scripts/
-├── smoke_v1.py                       # V1 全栈验收脚本
-└── smoke_v2.py                       # V2 全格式验收脚本
+├── smoke_v1.py / smoke_v2.py         # 历史闭环与全格式验收
+├── smoke_v3.py                       # V3 高级检索全栈验收
+├── rebuild_sparse_index.py           # 历史 BM25 回填
+└── evaluate_retrieval.py             # 离线检索指标
 
 tests/
 ├── unit/                             # 单元测试

@@ -131,9 +131,9 @@ self._validate(embeddings, len(texts))   # 阻止错误向量进入 Milvus
 
 `src/ultimate_rag/vectorstores/milvus.py`：
 
-- `ensure_collection`：幂等，已存在则复用
-- `upsert`：稳定 Chunk ID 为主键 + **Flush 落盘后才返回**
-- `search`：`knowledge_base_id` 过滤在 Milvus 层完成
+- `ensure_collection`：幂等准备 Dense 与 BM25 两个 Collection
+- `upsert`：稳定 Chunk ID 同步写入两种派生索引，**Flush 后才返回**
+- `search/search_sparse`：知识库与可选文档白名单在 Milvus 层过滤
 - 同步 SDK 全部 `asyncio.to_thread`
 
 ## 8. 问答链路代码导读
@@ -142,7 +142,8 @@ self._validate(embeddings, len(texts))   # 阻止错误向量进入 Milvus
 |---|---|
 | `routes.py` → `stream_chat` | 检索先于响应开始；SSE 事件顺序（start→data-retrieval→text-delta→finish） |
 | `services.py` → `RAGService._prepare_generation` | 无证据降级、XML 标签隔离、Citation 构造 |
-| `services.py` → `RetrievalService.search` | 二次过滤（Milvus 候选 → PostgreSQL READY 过滤） |
+| `application/retrieval.py` → `RetrievalService.retrieve` | READY/过滤、改写、多路召回、RRF、重排、Small2Big 与降级 |
+| `retrieval/fusion.py` | 不依赖模型/数据库的确定性 RRF |
 | `context.py` → `ContextBuilder` | 字符预算内拼接 `[来源 N]`，顺序不重排 |
 | `generation/bailian.py` | 完整生成 vs 原生增量流；空答案拒绝 |
 | `app.py` → 异常映射 | 404/400/409/502 的业务异常对应 |
@@ -156,7 +157,7 @@ repository.py  →  create_document_with_job   （文档+任务同事务）
 repository.py  →  update_document_status      （状态+错误同事务）
 repository.py  →  replace_chunks              （先删后插，重试不重复）
 services.py    →  process                     （READY 放最后）
-services.py    →  search                      （READY 二次过滤）
+retrieval.py   →  retrieve                    （READY 事实交集 + Hit 二次过滤）
 worker.py      →  _handle_processing_failure  （清理半成品向量）
 ```
 

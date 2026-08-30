@@ -48,6 +48,11 @@ async def test_chunker_splits_oversized_paragraph() -> None:
 
     assert len(chunks) > 1
     assert all(chunk.token_count <= 100 for chunk in chunks)
+    assert len({chunk.metadata["parent_id"] for chunk in chunks}) == 1
+    assert [chunk.metadata["parent_child_index"] for chunk in chunks] == list(
+        range(len(chunks))
+    )
+    assert all(chunk.metadata["parent_child_count"] == len(chunks) for chunk in chunks)
 
 
 @pytest.mark.asyncio

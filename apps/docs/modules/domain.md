@@ -60,19 +60,23 @@ class Embedder(Protocol):
 class VectorStore(Protocol):
     async def ensure_collection(self) -> None: ...
     async def upsert(self, chunks) -> None: ...
+    async def upsert_sparse(self, chunks) -> None: ...
     async def search(self, query_vector, knowledge_base_id, top_k) -> list[RetrievalResult]: ...
+    async def search_sparse(self, query, knowledge_base_id, top_k) -> list[RetrievalResult]: ...
     async def delete_by_document(self, document_id) -> None: ...
     async def delete_by_knowledge_base(self, knowledge_base_id) -> None: ...
 ```
 
-8 个端口一览：
+V3 端口一览：
 
-| 端口 | 方法 | V2 实现 |
+| 端口 | 方法 | V3 实现 |
 |---|---|---|
 | `DocumentParser` | `supports` / `parse` | 7 种 Parser |
 | `Chunker` | `split` | `StructureAwareChunker` |
 | `Embedder` | `embed_documents` / `embed_query` | `BailianEmbedder` |
-| `VectorStore` | `ensure_collection` / `upsert` / `search` / `delete_*` | `MilvusVectorStore` |
+| `VectorStore` | Dense/Sparse `upsert` / `search` / `delete_*` | `MilvusVectorStore` |
+| `QueryRewriter` | `rewrite` | `BailianQueryRewriter` |
+| `Reranker` | `rerank` | `BailianReranker` |
 | `ObjectStorage` | `ensure_bucket` / `put` / `get` / `delete` | `MinioObjectStorage` |
 | `LLMClient` | `generate` / `stream` | `BailianLLMClient` |
 | `OCRClient` | `extract_text` | `BailianOCRClient` |

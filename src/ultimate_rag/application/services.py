@@ -1,4 +1,4 @@
-"""V2 文档生命周期、后台处理、检索与生成应用服务。
+"""V3 文档生命周期、后台处理与生成应用服务。
 
 模块职责：
     以普通 Python Service 显式编排上传入队、后台文档处理与 RAG 查询链路。
@@ -12,7 +12,7 @@
     使 HTTP 上传在原文件和任务可靠落库后立即返回。
 
 数据一致性：
-    PostgreSQL 与 MinIO 保存事实数据，Milvus 保存可重建的派生索引。V2 不实现跨存储事务，
+    PostgreSQL 与 MinIO 保存事实数据，Milvus 保存可重建的派生索引。V3 不实现跨存储事务，
     而是使用稳定 ID、明确的 FAILED 状态和有限补偿降低部分失败造成的不一致。
 """
 
@@ -23,6 +23,7 @@ from pathlib import PurePath
 from uuid import uuid4
 
 from ultimate_rag.application.context import ContextBuilder
+from ultimate_rag.application.retrieval import RetrievalService
 from ultimate_rag.domain.exceptions import DocumentBusyError, InvalidDocumentError
 from ultimate_rag.domain.models import (
     Citation,
@@ -30,7 +31,10 @@ from ultimate_rag.domain.models import (
     DocumentSource,
     DocumentStatus,
     EmbeddedChunk,
+    RetrievalOptions,
     RetrievalResult,
+    RetrievalRun,
+    RetrievalTrace,
 )
 from ultimate_rag.domain.ports import Chunker, Embedder, LLMClient, ObjectStorage, VectorStore
 from ultimate_rag.infrastructure.database.repository import Repository
@@ -273,56 +277,6 @@ class DocumentProcessingService:
         await self._vector_store.delete_by_document(document_id)
 
 
-class RetrievalService:
-    """在 Application 层编排查询向量化与知识库范围内的 Dense Retrieval。
-
-    本类保证查询和文档使用同一个 Embedder，并把 VectorStore 结果直接返回为领域对象；
-    它不负责构造 Prompt 或调用 LLM，因此 Retrieval 可以独立测试和调试。
-    """
-
-    def __init__(
-        self,
-        embedder: Embedder,
-        vector_store: VectorStore,
-        repository: Repository,
-    ) -> None:
-        """注入共享向量编码器、向量索引与文档事实读取端。"""
-        self._embedder = embedder
-        self._vector_store = vector_store
-        self._repository = repository
-
-    async def search(
-        self,
-        knowledge_base_id: str,
-        query: str,
-        top_k: int,
-    ) -> list[RetrievalResult]:
-        """将查询编码后从指定知识库召回最多 ``top_k`` 个 Chunk。
-
-        Args:
-            knowledge_base_id: 检索过滤范围，禁止跨知识库召回。
-            query: 已通过 API 边界非空校验的自然语言问题。
-            top_k: 返回候选上限；V1 直接使用 API 校验后的值，不做 Rerank。
-
-        Returns:
-            按 VectorStore 相似度顺序排列、且带来源定位的领域检索结果。
-        """
-
-        # 查询必须沿用文档入库时的 Embedder；更换模型会改变向量空间，
-        # 即使维度相同，使用旧 Collection 检索也不会得到有意义的相似度。
-        query_vector = await self._embedder.embed_query(query)
-
-        # Milvus 是派生索引，索引写入与 PostgreSQL READY 状态无法形成跨系统原子事务。
-        # 多取少量候选后按事实状态过滤，可避免 Worker 崩溃时的半成品向量参与回答。
-        candidates = await self._vector_store.search(
-            query_vector,
-            knowledge_base_id,
-            min(top_k * 3, 60),
-        )
-        ready_document_ids = await self._repository.list_ready_document_ids(knowledge_base_id)
-        return [result for result in candidates if result.document_id in ready_document_ids][:top_k]
-
-
 class RAGService:
     """组合检索、受限上下文和 LLM 生成，并从召回结果构造 Citation。
 
@@ -352,19 +306,38 @@ class RAGService:
         question: str,
         top_k: int,
     ) -> tuple[str, list[Citation], list[RetrievalResult]]:
-        """回答一个知识库问题，同时返回引用和调试用召回结果。
+        """兼容 V1/V2 的三元组接口；V3 HTTP 层使用 :meth:`answer_with_trace`。"""
+
+        answer, citations, results, _trace = await self.answer_with_trace(
+            knowledge_base_id,
+            question,
+            top_k,
+        )
+        return answer, citations, results
+
+    async def answer_with_trace(
+        self,
+        knowledge_base_id: str,
+        question: str,
+        top_k: int,
+        options: RetrievalOptions | None = None,
+    ) -> tuple[str, list[Citation], list[RetrievalResult], RetrievalTrace]:
+        """回答一个知识库问题，同时返回引用、证据与高级检索 Trace。
 
         没有召回结果时不会调用 LLM，直接返回可解释的“无法确定”。
         """
 
-        user_prompt, citations, results = await self._prepare_generation(
-            knowledge_base_id, question, top_k
+        user_prompt, citations, results, trace = await self._prepare_generation(
+            knowledge_base_id,
+            question,
+            top_k,
+            options,
         )
         if user_prompt is None:
-            return "根据当前知识库无法确定。", [], []
+            return "根据当前知识库无法确定。", [], [], trace
 
         answer = await self._llm.generate(self.SYSTEM_PROMPT, user_prompt)
-        return answer, citations, results
+        return answer, citations, results, trace
 
     async def stream_answer(
         self,
@@ -372,29 +345,54 @@ class RAGService:
         question: str,
         top_k: int,
     ) -> tuple[AsyncIterator[str], list[Citation], list[RetrievalResult]]:
-        """准备检索证据并返回模型原生文本流、引用与召回结果。
+        """兼容 V2 的三元组流接口；V3 HTTP 层使用带 Trace 的对应方法。"""
+
+        answer_stream, citations, results, _trace = await self.stream_answer_with_trace(
+            knowledge_base_id,
+            question,
+            top_k,
+        )
+        return answer_stream, citations, results
+
+    async def stream_answer_with_trace(
+        self,
+        knowledge_base_id: str,
+        question: str,
+        top_k: int,
+        options: RetrievalOptions | None = None,
+    ) -> tuple[
+        AsyncIterator[str],
+        list[Citation],
+        list[RetrievalResult],
+        RetrievalTrace,
+    ]:
+        """准备检索证据并返回模型原生文本流、引用、召回结果与 Trace。
 
         Retrieval 必须在 HTTP 响应开始前完成。这样知识库不存在或向量服务不可用时，
         FastAPI 仍能返回正常的结构化错误状态，而不是已经发送 ``200`` 后才在流中失败。
 
         Returns:
-            三元组：异步文本增量、稳定 Citation 列表、完整 RetrievalResult 列表。
+            四元组：异步文本增量、稳定 Citation 列表、完整 RetrievalResult 列表与 Trace。
             无召回结果时返回只产生一次固定降级答案的本地流，不调用付费 LLM。
         """
 
-        user_prompt, citations, results = await self._prepare_generation(
-            knowledge_base_id, question, top_k
+        user_prompt, citations, results, trace = await self._prepare_generation(
+            knowledge_base_id,
+            question,
+            top_k,
+            options,
         )
         if user_prompt is None:
-            return self._fallback_stream(), [], []
-        return self._llm.stream(self.SYSTEM_PROMPT, user_prompt), citations, results
+            return self._fallback_stream(), [], [], trace
+        return self._llm.stream(self.SYSTEM_PROMPT, user_prompt), citations, results, trace
 
     async def _prepare_generation(
         self,
         knowledge_base_id: str,
         question: str,
         top_k: int,
-    ) -> tuple[str | None, list[Citation], list[RetrievalResult]]:
+        options: RetrievalOptions | None = None,
+    ) -> tuple[str | None, list[Citation], list[RetrievalResult], RetrievalTrace]:
         """共享非流式与流式问答的 Retrieve、Context 和 Citation 准备逻辑。
 
         把准备阶段集中在一个函数，可防止两个传输模式逐渐使用不同的上下文预算、引用顺序
@@ -403,9 +401,15 @@ class RAGService:
 
         # 阶段 1 — Retrieve：完整结果最终随答案返回，供 Retrieval Playground 调试。
         # 没有证据时跳过付费 LLM，并阻止模型依赖参数知识生成不可追溯的答案。
-        results = await self._retrieval.search(knowledge_base_id, question, top_k)
+        run: RetrievalRun = await self._retrieval.retrieve(
+            knowledge_base_id,
+            question,
+            top_k,
+            options,
+        )
+        results = list(run.results)
         if not results:
-            return None, [], []
+            return None, [], [], run.trace
 
         # 阶段 2 — Build Context：按召回顺序和字符预算确定性地编号、拼接证据。
         # 选择哪些 Chunk 进入上下文属于应用规则，不能交给 LLM 在生成时隐式决定。
@@ -426,10 +430,11 @@ class RAGService:
                 chunk_id=result.chunk_id,
                 heading_path=result.heading_path,
                 locator=result.locator,
+                context_chunk_ids=result.context_chunk_ids or (result.chunk_id,),
             )
             for result in results
         ]
-        return user_prompt, citations, results
+        return user_prompt, citations, results, run.trace
 
     @staticmethod
     async def _fallback_stream() -> AsyncIterator[str]:
@@ -440,7 +445,7 @@ class RAGService:
 class DocumentLifecycleService:
     """协调文档/知识库在三类存储中的删除。
 
-    当前 V1 为同步尽力删除：先清理派生向量与原文件，最后删除 PostgreSQL 事实记录；任一步失败都会
+    当前 V3 为同步尽力删除：先清理派生索引与原文件，最后删除 PostgreSQL 事实记录；任一步失败都会
     向上抛出，避免向用户谎报成功。V4 再引入补偿任务与可靠重试。
     """
 
@@ -458,7 +463,7 @@ class DocumentLifecycleService:
     async def delete_document(self, document_id: str) -> None:
         """按派生向量、原文件、事实记录的顺序同步删除一份文档。
 
-        删除失败时保留异常并停止后续步骤。V1 没有跨存储事务或后台补偿任务，保留最后的
+        删除失败时保留异常并停止后续步骤。V3 没有跨存储事务或后台补偿任务，保留最后的
         PostgreSQL 事实记录可以让运维人员继续定位尚未清理的外部资源。
         """
 
@@ -487,7 +492,7 @@ class DocumentLifecycleService:
         ):
             raise DocumentBusyError("知识库仍有文档正在后台处理，完成或失败后才能删除")
 
-        # Milvus 支持按知识库过滤条件批量删除，MinIO V1 则按系统 Object Key 逐个删除。
+        # Milvus 支持按知识库过滤条件批量删除，MinIO 则按系统 Object Key 逐个删除。
         # PostgreSQL 事实仍然最后提交删除，使中途失败后可以使用同一调用重新清理。
         await self._vector_store.delete_by_knowledge_base(knowledge_base_id)
         for document in documents:

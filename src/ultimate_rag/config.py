@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """UltimateRAG V2 的集中配置模型。
+    """UltimateRAG V3 的集中配置模型。
 
     默认值面向本地 Docker Compose 开发环境；密钥必须由环境变量或未提交的 ``.env`` 提供。
     """
@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     milvus_uri: str = "http://localhost:19530"
     milvus_token: str | None = None
     milvus_collection: str = "knowledge_chunks"
+    # V3 使用独立 BM25 Collection 旁路升级，历史 Dense 索引无需重新向量化。
+    milvus_sparse_collection: str = "knowledge_chunks_sparse_v3"
+    bm25_k1: float = Field(default=1.2, gt=0.0, le=10.0)
+    bm25_b: float = Field(default=0.75, ge=0.0, le=1.0)
 
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_api_key: str
@@ -49,6 +53,12 @@ class Settings(BaseSettings):
     embedding_dimension: int = 1024
     embedding_batch_size: int = 10
     llm_model: str = "qwen-plus"
+    query_rewrite_model: str = "qwen-plus"
+    # gte-rerank-v2 已于 2026-05-30 停服；V3 默认使用当前 Qwen3 兼容接口。
+    rerank_model: str = "qwen3-rerank"
+    rerank_url: str = "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
+    # 官方总请求上限为 120k Token，Adapter 还会预留 tokenizer 估算安全余量。
+    rerank_max_request_tokens: int = Field(default=120_000, ge=10_000, le=120_000)
     ocr_model: str = "qwen3.5-ocr"
     vision_model: str = "qwen3-vl-flash"
     # 百炼 Base64 OCR 接口要求原图小于 7 MB；默认留出编码和服务端校验余量。
@@ -63,7 +73,15 @@ class Settings(BaseSettings):
     chunk_max_tokens: int = Field(default=512, ge=64, le=8192)
     chunk_overlap_tokens: int = Field(default=64, ge=0, le=2048)
     chunk_tokenizer: str = "cl100k_base"
-    retrieval_top_k: int = 5
+    retrieval_top_k: int = Field(default=5, ge=1, le=20)
+    # 先广召回 30 个候选、再收敛到 top_k；该基线必须继续通过真实评估集调优。
+    retrieval_candidate_k: int = Field(default=30, ge=1, le=100)
+    retrieval_rrf_k: int = Field(default=60, ge=1, le=1000)
+    retrieval_query_rewrite: bool = True
+    retrieval_rerank: bool = True
+    retrieval_parent_expansion: bool = True
+    retrieval_parent_window: int = Field(default=1, ge=0, le=3)
+    retrieval_parent_max_tokens: int = Field(default=1536, ge=64, le=8192)
     context_max_chars: int = 12000
 
     # PostgreSQL 持久化队列采用有限重试与租约回收，不允许无限重试或永久 RUNNING。
@@ -101,6 +119,10 @@ class Settings(BaseSettings):
 
         if self.chunk_overlap_tokens >= self.chunk_max_tokens:
             raise ValueError("chunk_overlap_tokens must be smaller than chunk_max_tokens")
+        if self.retrieval_parent_max_tokens < self.chunk_max_tokens:
+            raise ValueError(
+                "retrieval_parent_max_tokens must be at least chunk_max_tokens"
+            )
         if self.worker_heartbeat_seconds >= self.worker_lease_seconds:
             raise ValueError("worker_heartbeat_seconds must be smaller than worker_lease_seconds")
         return self

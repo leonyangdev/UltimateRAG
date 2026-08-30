@@ -39,7 +39,9 @@ settings = get_settings()   # 进程内单例，只解析一次
 | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | 本地开发账号 | MinIO 凭据（生产必须更换） |
 | `MINIO_BUCKET` | `documents` | 原始文件桶 |
 | `MILVUS_URI` | `http://localhost:19530` | Milvus 地址 |
-| `MILVUS_COLLECTION` | `knowledge_chunks` | 向量 Collection |
+| `MILVUS_COLLECTION` | `knowledge_chunks` | Dense Collection |
+| `MILVUS_SPARSE_COLLECTION` | `knowledge_chunks_sparse_v3` | BM25 Sparse Collection |
+| `BM25_K1` / `BM25_B` | `1.2` / `0.75` | BM25 基线参数；修改后需显式重建 Sparse 索引 |
 
 ### 模型（阿里云百炼）
 
@@ -51,6 +53,10 @@ settings = get_settings()   # 进程内单例，只解析一次
 | `EMBEDDING_DIMENSION` | `1024` | 向量维度（必须与 Milvus 一致） |
 | `EMBEDDING_BATCH_SIZE` | `10` | 每批向量化数量 |
 | `LLM_MODEL` | `qwen-plus` | 问答模型 |
+| `QUERY_REWRITE_MODEL` | `qwen-plus` | 结构化查询改写模型 |
+| `RERANK_MODEL` | `qwen3-rerank` | 文本重排模型 |
+| `RERANK_URL` | 百炼 `/compatible-api/v1/reranks` | Qwen3 Rerank API 地址 |
+| `RERANK_MAX_REQUEST_TOKENS` | `120000` | 总请求 Token 硬上限，实际还预留 10% 估算余量 |
 | `OCR_MODEL` | `qwen3.5-ocr` | OCR 模型 |
 | `VISION_MODEL` | `qwen3-vl-flash` | 图片语义理解模型 |
 | `OCR_MAX_IMAGE_BYTES` | `6MB` | OCR 单图上限（百炼 Base64 限制约 7MB） |
@@ -68,6 +74,13 @@ settings = get_settings()   # 进程内单例，只解析一次
 | `CHUNK_OVERLAP_TOKENS` | `64` | Chunk 重叠 Token |
 | `CHUNK_TOKENIZER` | `cl100k_base` | 本地 Token 预算近似器 |
 | `RETRIEVAL_TOP_K` | `5` | 默认召回数 |
+| `RETRIEVAL_CANDIDATE_K` | `30` | 融合/重排前候选宽度 |
+| `RETRIEVAL_RRF_K` | `60` | RRF 排名平滑常数 |
+| `RETRIEVAL_QUERY_REWRITE` | `true` | 默认是否启用查询改写 |
+| `RETRIEVAL_RERANK` | `true` | 默认是否启用二阶段重排 |
+| `RETRIEVAL_PARENT_EXPANSION` | `true` | 默认是否启用 Small2Big |
+| `RETRIEVAL_PARENT_WINDOW` | `1` | Parent 内前后 Child 窗口（0–3） |
+| `RETRIEVAL_PARENT_MAX_TOKENS` | `1536` | 单条扩展上下文 Token 上限 |
 | `CONTEXT_MAX_CHARS` | `12000` | LLM 上下文最大字符数 |
 
 ### Worker 任务
@@ -97,9 +110,10 @@ settings = get_settings()   # 进程内单例，只解析一次
 
 ## 3. 校验规则
 
-配置里有两个跨字段校验（`validate_cross_field_limits`）：
+配置里有三个跨字段校验（`validate_cross_field_limits`）：
 
 - `chunk_overlap_tokens` 必须小于 `chunk_max_tokens`
+- `retrieval_parent_max_tokens` 必须不小于 `chunk_max_tokens`
 - `worker_heartbeat_seconds` 必须小于 `worker_lease_seconds`
 
 违反会在启动时报错，而不是在运行时才暴露。
