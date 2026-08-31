@@ -59,7 +59,7 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
 上传文档（multipart/form-data，字段名 `file`）。**返回 202，不等待处理完成。**
 
 ```json
-// 响应：status 初始为 pending
+// 响应：status 初始为 PENDING
 {
   "id": "doc-123",
   "knowledge_base_id": "kb-1",
@@ -67,7 +67,7 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
   "mime_type": "text/markdown",
   "extension": ".md",
   "sha256": "9f86d08...",
-  "status": "pending",
+  "status": "PENDING",
   "parser_name": null,
   "parser_version": null,
   "error_message": null,
@@ -89,6 +89,11 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
 ### `DELETE /api/documents/{document_id}` → 204
 
 删除文档原文件、Chunk 和派生向量。文档正在处理时 → 409。
+
+### `GET /api/chunks/{chunk_id}/preview` → 200 (image/jpeg)
+
+按 PostgreSQL 中保存的页码/BBox，从 MinIO 原 PDF 本地渲染命中区域。接口不接受自定义裁剪参数；
+非 PDF、非 READY、无页码或不存在的 Chunk 返回 404。响应支持 `ETag`、`If-None-Match` 与私有缓存。
 
 ## 4. 检索与问答
 
@@ -129,7 +134,9 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
     "rerank_score": 0.91,
     "retrieval_sources": ["dense:original", "sparse:original"],
     "matched_content": "检索增强生成（RAG）...",
-    "context_chunk_ids": ["chunk-before", "chunk-abc"]
+    "context_chunk_ids": ["chunk-before", "chunk-abc"],
+    "content_types": ["TABLE"],
+    "preview_url": "/api/chunks/chunk-abc/preview"
   }
 ]
 ```
@@ -226,7 +233,25 @@ x-vercel-ai-ui-message-stream: v1     # AI SDK 识别标记
 { "type": "error", "errorText": "生成过程中断，请稍后重试。" }
 ```
 
-## 5. HTTP 状态码与业务异常映射
+## 5. 会话 API
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/knowledge-bases/{id}/chat-sessions` | 创建空白新会话 |
+| `GET` | `/api/knowledge-bases/{id}/chat-sessions` | 按最近活动列出历史会话 |
+| `GET` | `/api/chat-sessions/{session_id}` | 返回会话与完整消息 |
+
+新版 `/api/chat` 与 `/api/chat/stream` 可传 `session_id`。后端会验证会话属于请求中的知识库；
+不传时保留旧版无状态行为。全文总结的 `retrieval_trace` 还会返回：
+
+```json
+{
+  "intent": "document_summary",
+  "strategy": "structural_coverage"
+}
+```
+
+## 6. HTTP 状态码与业务异常映射
 
 | 状态码 | 业务异常 | 场景 |
 |---|---|---|
@@ -236,7 +261,7 @@ x-vercel-ai-ui-message-stream: v1     # AI SDK 识别标记
 | `502` | `UltimateRAGError`（其他已知） | 外部处理故障；不暴露 Stack Trace |
 | `500` | 未预期异常 | 兜底（FastAPI 默认） |
 
-## 6. 通用字段说明
+## 7. 通用字段说明
 
 | 字段 | 说明 |
 |---|---|
@@ -248,6 +273,8 @@ x-vercel-ai-ui-message-stream: v1     # AI SDK 识别标记
 | `dense_score` / `sparse_score` | 各召回通道原始分数 |
 | `fusion_score` / `rerank_score` | 融合与二阶段重排分数；未执行阶段为 `null` |
 | `context_chunk_ids` | Small2Big 实际进入上下文的 Child ID；Citation 仍锚定命中 `chunk_id` |
+| `content_types` | 命中 Child 的结构类型，如 `TEXT`、`TABLE`、`IMAGE` |
+| `preview_url` | 有 PDF 页码时返回受控局部预览路径，否则为 `null` |
 
 ## 下一步
 

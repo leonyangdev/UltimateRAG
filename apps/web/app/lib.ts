@@ -61,6 +61,8 @@ export interface RetrievalResult {
   retrieval_sources: string[];
   matched_content: string | null;
   context_chunk_ids: string[];
+  content_types: Array<"HEADING" | "TEXT" | "CODE" | "LIST" | "QUOTE" | "TABLE" | "IMAGE">;
+  preview_url: string | null;
 }
 
 export type RetrievalMode = "dense" | "sparse" | "hybrid";
@@ -76,6 +78,8 @@ export interface RetrievalTrace {
   rerank_applied: boolean;
   parent_expansion_applied: boolean;
   fallback_reasons: string[];
+  intent: "fact" | "document_summary";
+  strategy: "ranked_retrieval" | "structural_coverage" | string;
 }
 
 export interface RetrievalExplainResponse {
@@ -109,6 +113,47 @@ export interface ChatResult {
   citations: Citation[];
   retrieval_results: RetrievalResult[];
   retrieval_trace: RetrievalTrace;
+}
+
+export interface ChatSession {
+  id: string;
+  knowledge_base_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatMessageRecord {
+  id: string;
+  role: "user" | "assistant";
+  status: "PENDING" | "COMPLETE" | "FAILED";
+  content: string;
+  error_message: string | null;
+  created_at: string;
+}
+
+export interface ChatSessionDetail {
+  session: ChatSession;
+  messages: ChatMessageRecord[];
+}
+
+/** 将持久化消息恢复为 AI SDK UIMessage；历史证据可在后续版本按消息独立存储。 */
+export function toRAGMessages(records: ChatMessageRecord[]): RAGMessage[] {
+  return records
+    .filter((record) => record.status !== "PENDING")
+    .map((record) => ({
+      id: record.id,
+      role: record.role,
+      parts: [
+        {
+          type: "text" as const,
+          text:
+            record.status === "FAILED"
+              ? record.error_message || "这次回答未完成，请重新提问。"
+              : record.content,
+        },
+      ],
+    }));
 }
 
 /**

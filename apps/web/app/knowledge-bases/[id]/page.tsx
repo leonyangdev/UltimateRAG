@@ -193,7 +193,7 @@ export default function KnowledgeBaseWorkspacePage() {
         </div>
 
         <Button asChild className="shrink-0">
-          <Link href="/chat">
+          <Link href={`/chat?knowledge_base_id=${id}`}>
             进入知识问答
             <ArrowRight />
           </Link>

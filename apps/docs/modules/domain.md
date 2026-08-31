@@ -38,7 +38,8 @@ class Chunk:
 - 值对象：`SourceLocator`（来源定位）
 - 实体：`KnowledgeBase`、`Document`、`IngestionJob`
 - 中间结果：`DocumentSource`、`Block`、`ParsedDocument`
-- 检索/引用：`Chunk`、`EmbeddedChunk`、`RetrievalResult`、`Citation`
+- 检索/引用：`Chunk`、`EmbeddedChunk`、`RetrievalResult`、`Citation`、`DocumentPreview`
+- 会话：`ChatSession`、`ChatMessage`、`ChatTurn`
 
 所有对象都是 `frozen=True`（不可变），保证跨层传递安全、便于测试。
 
@@ -81,6 +82,7 @@ V3 端口一览：
 | `LLMClient` | `generate` / `stream` | `BailianLLMClient` |
 | `OCRClient` | `extract_text` | `BailianOCRClient` |
 | `VisionClient` | `describe` | `BailianVisionClient` |
+| `PDFPreviewRenderer` | `render` | `PDFiumPreviewRenderer` |
 
 ::: tip 为什么用 Protocol 而不是抽象类
 Protocol 是「鸭子类型」接口：只要类实现了这些方法签名，就自动满足接口，不需要继承。这让测试时可以轻松注入内存 Stub（假实现），不访问真实外部服务。

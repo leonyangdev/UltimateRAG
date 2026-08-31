@@ -82,6 +82,12 @@ settings = get_settings()   # 进程内单例，只解析一次
 | `RETRIEVAL_PARENT_WINDOW` | `1` | Parent 内前后 Child 窗口（0–3） |
 | `RETRIEVAL_PARENT_MAX_TOKENS` | `1536` | 单条扩展上下文 Token 上限 |
 | `CONTEXT_MAX_CHARS` | `12000` | LLM 上下文最大字符数 |
+| `SUMMARY_MAX_CHUNKS` | `24` | 全文总结最多覆盖的章节 Chunk 数 |
+| `SUMMARY_MAX_TOKENS` | `16000` | 全文总结证据 Token 预算 |
+| `SUMMARY_CONTEXT_MAX_CHARS` | `64000` | 全文总结独立 Context 字符预算 |
+| `CHAT_RECENT_TOKEN_BUDGET` | `6000` | 每轮保留的最近会话原文 Token 预算 |
+| `CHAT_MEMORY_MAX_TOKENS` | `1600` | 递归长期记忆最大输出 Token |
+| `CHAT_GENERATION_STALE_SECONDS` | `600` | PENDING 生成超时恢复阈值 |
 
 ### Worker 任务
 

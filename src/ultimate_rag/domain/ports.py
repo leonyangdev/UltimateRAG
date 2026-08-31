@@ -8,6 +8,7 @@ from typing import Protocol
 
 from ultimate_rag.domain.models import (
     Chunk,
+    DocumentPreview,
     DocumentSource,
     EmbeddedChunk,
     ParsedDocument,
@@ -115,10 +116,46 @@ class ObjectStorage(Protocol):
         ...
 
 
+class PDFPreviewRenderer(Protocol):
+    """隔离 PDF 栅格化基础设施的视觉证据端口。
+
+    应用层负责校验 Chunk、Document 和 SourceLocator；实现只负责确定性渲染，不读取数据库、
+    对象存储或 HTTP 参数。该边界既避免 Application 直接依赖 PDFium，也允许单元测试验证“只使用
+    持久化坐标”而无需打开真实 PDF。
+    """
+
+    async def render(
+        self,
+        content: bytes,
+        *,
+        page: int,
+        bbox: tuple[float, float, float, float] | None,
+        etag_seed: str,
+    ) -> DocumentPreview:
+        """渲染一基页码，并返回带稳定缓存标识的图片。
+
+        Args:
+            content: 完整原 PDF 字节。
+            page: 一基页码。
+            bbox: 左上角原点的可选 PDF point 坐标。
+            etag_seed: 绑定文档版本和 Chunk 的稳定种子。
+
+        Returns:
+            不依赖具体 PDF SDK 的领域预览对象。
+        """
+        ...
+
+
 class LLMClient(Protocol):
     """文本生成模型边界，不承担检索或 Prompt 上下文构造。"""
 
-    async def generate(self, system_prompt: str, user_prompt: str) -> str:
+    async def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
         """基于系统约束和用户消息生成非空文本答案。"""
         ...
 
@@ -134,8 +171,8 @@ class LLMClient(Protocol):
 class QueryRewriter(Protocol):
     """把含糊用户问题改写为至多一个更适合检索的查询。"""
 
-    async def rewrite(self, query: str) -> str | None:
-        """返回保留原意的替代查询；无需改写时返回 ``None``。"""
+    async def rewrite(self, query: str, conversation_context: str | None = None) -> str | None:
+        """返回保留原意的独立查询；上下文仅用于消解“它/上述方案”等指代。"""
         ...
 
 

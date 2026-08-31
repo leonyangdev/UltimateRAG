@@ -5,11 +5,15 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from ultimate_rag.domain.models import DocumentStatus, IngestionJobStatus
+from ultimate_rag.domain.models import (
+    ChatMessageStatus,
+    DocumentStatus,
+    IngestionJobStatus,
+)
 
 
 def utc_now() -> datetime:
@@ -36,6 +40,9 @@ class KnowledgeBaseModel(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
     documents: Mapped[list["DocumentModel"]] = relationship(
+        back_populates="knowledge_base", cascade="all, delete-orphan"
+    )
+    chat_sessions: Mapped[list["ChatSessionModel"]] = relationship(
         back_populates="knowledge_base", cascade="all, delete-orphan"
     )
 
@@ -111,3 +118,51 @@ class ChunkModel(Base):
     chunk_metadata: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     document: Mapped[DocumentModel] = relationship(back_populates="chunks")
+
+
+class ChatSessionModel(Base):
+    """会话元数据与递归摘要；完整消息保存在独立事实表。"""
+
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    knowledge_base_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(120), default="新会话")
+    memory_summary: Mapped[str] = mapped_column(Text, default="")
+    memory_through_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    next_sequence: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    knowledge_base: Mapped[KnowledgeBaseModel] = relationship(back_populates="chat_sessions")
+    messages: Mapped[list["ChatMessageModel"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+
+
+class ChatMessageModel(Base):
+    """不可丢失的消息事实和流式生成提交状态。"""
+
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence", name="uq_chat_messages_session_sequence"),
+        Index("ix_chat_messages_session_status", "session_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default=ChatMessageStatus.COMPLETE.value)
+    content: Mapped[str] = mapped_column(Text, default="")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    session: Mapped[ChatSessionModel] = relationship(back_populates="messages")

@@ -8,6 +8,7 @@ import pytest
 
 from ultimate_rag.application import RetrievalService
 from ultimate_rag.domain.models import (
+    BlockType,
     Chunk,
     EmbeddedChunk,
     RerankResult,
@@ -322,7 +323,7 @@ async def test_parent_expansion_keeps_same_parent_and_token_budget() -> None:
             heading_path=("V3",),
             token_count=tokens,
             locator=SourceLocator(heading_path=("V3",), page=1),
-            metadata={"parent_id": parent_id},
+            metadata={"parent_id": parent_id, "block_types": ["TABLE"]},
         )
 
     before = chunk(0, "parent-1", "前文")
@@ -356,6 +357,7 @@ async def test_parent_expansion_keeps_same_parent_and_token_budget() -> None:
     assert run.results[0].content == "前文\n\n命中"
     assert run.results[0].matched_content == "a"
     assert run.results[0].context_chunk_ids == ("child-0", "a")
+    assert run.results[0].content_types == (BlockType.TABLE,)
     assert "下一节" not in run.results[0].content
     assert run.trace.parent_expansion_applied is True
 

@@ -87,6 +87,7 @@ POST   /api/knowledge-bases/{kb_id}/documents    → 202 上传入队（不等�
 GET    /api/knowledge-bases/{kb_id}/documents    → 列表 + 实时状态
 GET    /api/documents/{doc_id}                   → 单个元数据
 DELETE /api/documents/{doc_id}                   → 204 删除
+GET    /api/chunks/{chunk_id}/preview             → PDF 命中区域 JPEG（按需渲染）
 ```
 
 **问答**
@@ -125,6 +126,7 @@ start → start-step → data-retrieval（引用+证据+Trace 随同一条消息
 
 - **检索在 StreamingResponse 建立前完成**：知识库不存在、Embedding 失败、Milvus 不可用时，仍能返回结构化 HTTP 状态码
 - **Citation/RetrievalResult/RetrievalTrace 通过有类型的 `data-retrieval` Part 同消息返回**：前端不需要在流结束后再发请求补取证据
+- PDF 结果还携带 `content_types + preview_url`；证据卡用 GFM 渲染表格，并懒加载原 PDF 局部截图
 - LLM 在响应开始后的故障只能编码为 `error` Part（此时 200 已发出），日志保留完整堆栈，浏览器只收到稳定文案
 - 响应头：
   - `X-Accel-Buffering: no`：关闭 Nginx 缓冲，让 token 及时抵达

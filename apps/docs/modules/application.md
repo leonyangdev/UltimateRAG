@@ -16,6 +16,7 @@ Application 层是**业务工作流的编排者**：它不知道文件怎么解�
 | `DocumentProcessingService` | 后台处理管线：Parse → Chunk → Embed → Index（由 Worker 调用） |
 | `RetrievalService` | 独立检索：事实过滤 → 改写 → Dense/BM25 → RRF → 重排 → Small2Big |
 | `RAGService` | 问答：检索 → 拼上下文 → LLM → 答案 + 引用 |
+| `VisualEvidenceService` | 校验 Chunk/Document 事实，协调 MinIO 原文与 PDF 局部预览 |
 | `DocumentLifecycleService` | 删除文档/知识库，协调三类存储清理 |
 | `ContextBuilder` | 把检索结果拼接成带来源编号的 LLM 上下文 |
 

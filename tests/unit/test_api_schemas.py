@@ -1,10 +1,16 @@
 """验证 V3 检索 API 的边界清洗和领域配置映射。"""
 
 import pytest
-from api.schemas import ChatRequest, RetrievalRequest
+from api.schemas import ChatRequest, RetrievalRequest, RetrievalResultResponse
 from pydantic import ValidationError
 
-from ultimate_rag.domain.models import RetrievalMode, RetrievalOptions
+from ultimate_rag.domain.models import (
+    BlockType,
+    RetrievalMode,
+    RetrievalOptions,
+    RetrievalResult,
+    SourceLocator,
+)
 
 
 def test_retrieval_request_normalizes_and_deduplicates_document_filter() -> None:
@@ -55,3 +61,24 @@ def test_chat_request_keeps_question_alias_and_inherited_validation() -> None:
     request = ChatRequest(knowledge_base_id="kb-1", question="  查询内容  ")
 
     assert request.query == "查询内容"
+
+
+def test_pdf_retrieval_result_exposes_visual_evidence_metadata() -> None:
+    """带页码的 TABLE 命中应向前端提供类型与受控 Chunk 预览地址。"""
+
+    response = RetrievalResultResponse.from_domain(
+        RetrievalResult(
+            chunk_id="chunk-1",
+            knowledge_base_id="kb-1",
+            document_id="doc-1",
+            filename="paper.pdf",
+            content="| Model | BLEU |",
+            heading_path=("Results",),
+            score=0.9,
+            locator=SourceLocator(page=8, bbox=(10.0, 20.0, 200.0, 120.0)),
+            content_types=(BlockType.TABLE,),
+        )
+    )
+
+    assert response.content_types == ["TABLE"]
+    assert response.preview_url == "/api/chunks/chunk-1/preview"

@@ -19,7 +19,9 @@
 9. 按文档白名单过滤，并用同 Parent 相邻 Child 扩展回答上下文
 10. 查看查询变体、召回通道、各阶段分数、降级原因和精确 Citation
 11. 使用阿里云百炼模型进行知识库问答，并用 JSONL 指标工具做检索消融评估
-12. 删除文档或知识库，并同步清理三类存储和两个 Milvus 派生索引
+12. 全文总结自动改用跨章节覆盖，避免摘要、实验和结论被参考文献挤出 Top-K
+13. 每次进入知识库新建会话，也可恢复历史会话；长对话使用“递归摘要 + 最近原文”
+14. 删除文档或知识库，并同步清理三类存储和两个 Milvus 派生索引
 
 V3 明确不包含 ACL/认证/审计、DLQ 控制台、完整 RAGOps 和 Agent/GraphRAG；这些属于后续版本。
 
@@ -65,7 +67,9 @@ Domain Ports
 - 知识库内容按不可信输入处理，不能覆盖系统 Prompt
 
 详细设计见 [V3 实现说明](docs/5.v3_implementation.md) 和
-[ADR-002：Hybrid Retrieval](docs/adr/ADR-002-v3-hybrid-retrieval.md)。V2 文档智能见
+[ADR-002：Hybrid Retrieval](docs/adr/ADR-002-v3-hybrid-retrieval.md)、
+[ADR-003：总结感知检索与会话记忆](docs/adr/ADR-003-summary-aware-retrieval-and-chat-memory.md)。
+V2 文档智能见
 [V2 实现说明](docs/4.v2_implementation.md)。
 
 ## 技术栈

@@ -11,8 +11,13 @@ from uuid import uuid4
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ultimate_rag.domain.exceptions import ResourceNotFoundError
+from ultimate_rag.domain.exceptions import ChatSessionBusyError, ResourceNotFoundError
 from ultimate_rag.domain.models import (
+    ChatMessage,
+    ChatMessageStatus,
+    ChatRole,
+    ChatSession,
+    ChatTurn,
     Chunk,
     Document,
     DocumentStatus,
@@ -23,6 +28,8 @@ from ultimate_rag.domain.models import (
     SourceLocator,
 )
 from ultimate_rag.infrastructure.database.models import (
+    ChatMessageModel,
+    ChatSessionModel,
     ChunkModel,
     DocumentModel,
     IngestionJobModel,
@@ -59,6 +66,189 @@ class Repository:
             if model is None:
                 raise ResourceNotFoundError("知识库不存在")
             return self._knowledge_base(model)
+
+    async def create_chat_session(self, knowledge_base_id: str) -> ChatSession:
+        """为知识库创建一个空白会话；首次问题会确定可读标题。"""
+
+        model = ChatSessionModel(id=str(uuid4()), knowledge_base_id=knowledge_base_id)
+        async with self._session_factory() as session, session.begin():
+            if await session.get(KnowledgeBaseModel, knowledge_base_id) is None:
+                raise ResourceNotFoundError("知识库不存在")
+            session.add(model)
+        return self._chat_session(model)
+
+    async def list_chat_sessions(self, knowledge_base_id: str) -> list[ChatSession]:
+        """按最近活动时间列出历史会话，并区分知识库不存在与无会话。"""
+
+        await self.get_knowledge_base(knowledge_base_id)
+        async with self._session_factory() as session:
+            values = await session.scalars(
+                select(ChatSessionModel)
+                .where(ChatSessionModel.knowledge_base_id == knowledge_base_id)
+                .order_by(ChatSessionModel.updated_at.desc())
+            )
+            return [self._chat_session(model) for model in values]
+
+    async def get_chat_session(self, session_id: str) -> ChatSession:
+        """读取会话元数据，不存在时返回稳定的业务错误。"""
+
+        async with self._session_factory() as session:
+            model = await session.get(ChatSessionModel, session_id)
+            if model is None:
+                raise ResourceNotFoundError("会话不存在")
+            return self._chat_session(model)
+
+    async def list_chat_messages(self, session_id: str) -> list[ChatMessage]:
+        """按序返回会话全部消息，包括可供前端解释的失败生成。"""
+
+        await self.get_chat_session(session_id)
+        async with self._session_factory() as session:
+            values = await session.scalars(
+                select(ChatMessageModel)
+                .where(ChatMessageModel.session_id == session_id)
+                .order_by(ChatMessageModel.sequence)
+            )
+            return [self._chat_message(model) for model in values]
+
+    async def begin_chat_turn(
+        self,
+        *,
+        session_id: str,
+        knowledge_base_id: str,
+        question: str,
+        stale_after_seconds: int,
+    ) -> ChatTurn:
+        """原子创建用户消息与待提交助手消息，并返回此前完整历史。
+
+        会话行锁与 PENDING 助手占位共同保证同一会话最多只有一个生成。若进程崩溃，超过
+        ``stale_after_seconds`` 的占位会被明确标记 FAILED 后恢复，避免会话永久锁死。
+        """
+
+        normalized_question = question.strip()
+        if not normalized_question:
+            raise ValueError("question cannot be empty")
+        now = datetime.now(UTC)
+        stale_before = now - timedelta(seconds=stale_after_seconds)
+        async with self._session_factory() as session, session.begin():
+            model = await session.scalar(
+                select(ChatSessionModel).where(ChatSessionModel.id == session_id).with_for_update()
+            )
+            if model is None:
+                raise ResourceNotFoundError("会话不存在")
+            if model.knowledge_base_id != knowledge_base_id:
+                raise ResourceNotFoundError("会话不属于当前知识库")
+
+            pending = await session.scalar(
+                select(ChatMessageModel)
+                .where(
+                    ChatMessageModel.session_id == session_id,
+                    ChatMessageModel.role == ChatRole.ASSISTANT.value,
+                    ChatMessageModel.status == ChatMessageStatus.PENDING.value,
+                )
+                .order_by(ChatMessageModel.sequence.desc())
+                .limit(1)
+            )
+            if pending is not None and pending.updated_at > stale_before:
+                raise ChatSessionBusyError("当前会话正在生成回答，请等待完成后再发送")
+            if pending is not None:
+                pending.status = ChatMessageStatus.FAILED.value
+                pending.error_message = "上一次生成因服务中断未完成，请重新提问"
+                pending.updated_at = now
+
+            history_models = list(
+                await session.scalars(
+                    select(ChatMessageModel)
+                    .where(
+                        ChatMessageModel.session_id == session_id,
+                        ChatMessageModel.status == ChatMessageStatus.COMPLETE.value,
+                    )
+                    .order_by(ChatMessageModel.sequence)
+                )
+            )
+            user = ChatMessageModel(
+                id=str(uuid4()),
+                session_id=session_id,
+                sequence=model.next_sequence,
+                role=ChatRole.USER.value,
+                status=ChatMessageStatus.COMPLETE.value,
+                content=normalized_question,
+                created_at=now,
+                updated_at=now,
+            )
+            assistant = ChatMessageModel(
+                id=str(uuid4()),
+                session_id=session_id,
+                sequence=model.next_sequence + 1,
+                role=ChatRole.ASSISTANT.value,
+                status=ChatMessageStatus.PENDING.value,
+                content="",
+                created_at=now,
+                updated_at=now,
+            )
+            if model.next_sequence == 1:
+                model.title = self._chat_title(normalized_question)
+            model.next_sequence += 2
+            model.updated_at = now
+            session.add_all([user, assistant])
+
+        return ChatTurn(
+            session=self._chat_session(model),
+            user_message=self._chat_message(user),
+            assistant_message=self._chat_message(assistant),
+            history=tuple(self._chat_message(value) for value in history_models),
+        )
+
+    async def complete_chat_turn(self, assistant_message_id: str, content: str) -> None:
+        """仅允许把 PENDING 助手占位提交为非空完整答案。"""
+
+        normalized = content.strip()
+        if not normalized:
+            raise ValueError("assistant content cannot be empty")
+        async with self._session_factory() as session, session.begin():
+            message = await session.get(ChatMessageModel, assistant_message_id)
+            if (
+                message is None
+                or message.role != ChatRole.ASSISTANT.value
+                or message.status != ChatMessageStatus.PENDING.value
+            ):
+                raise RuntimeError("助手消息不存在或已经结束")
+            message.content = normalized
+            message.status = ChatMessageStatus.COMPLETE.value
+            message.error_message = None
+            parent = await session.get(ChatSessionModel, message.session_id)
+            if parent is not None:
+                parent.updated_at = datetime.now(UTC)
+
+    async def fail_chat_turn(self, assistant_message_id: str, error_message: str) -> None:
+        """把尚未完成的生成标记为 FAILED；重复调用保持幂等。"""
+
+        async with self._session_factory() as session, session.begin():
+            message = await session.get(ChatMessageModel, assistant_message_id)
+            if message is None or message.status != ChatMessageStatus.PENDING.value:
+                return
+            message.status = ChatMessageStatus.FAILED.value
+            message.error_message = (error_message.strip() or "生成失败")[:1000]
+
+    async def update_chat_memory(
+        self,
+        session_id: str,
+        *,
+        summary: str,
+        through_sequence: int,
+    ) -> ChatSession:
+        """更新可重建的递归摘要游标，不删除任何原始消息。"""
+
+        async with self._session_factory() as session, session.begin():
+            model = await session.scalar(
+                select(ChatSessionModel).where(ChatSessionModel.id == session_id).with_for_update()
+            )
+            if model is None:
+                raise ResourceNotFoundError("会话不存在")
+            # 只允许游标前进；并发或重试不能用旧摘要覆盖更新后的长期记忆。
+            if through_sequence > model.memory_through_sequence:
+                model.memory_summary = summary.strip()
+                model.memory_through_sequence = through_sequence
+            return self._chat_session(model)
 
     async def delete_knowledge_base(self, knowledge_base_id: str) -> list[Document]:
         """在单个事务中删除知识库及级联记录，并返回原文档快照。"""
@@ -347,6 +537,35 @@ class Repository:
                 raise ResourceNotFoundError("文档不存在")
             return self._document(model)
 
+    async def get_chunk(self, chunk_id: str) -> Chunk:
+        """读取单个 Chunk 及其所属文档的知识库 ID、文件名事实。
+
+        Chunk 表不冗余知识库与展示文件名，因此必须在同一条 SQL 中连接 Document 后再恢复完整
+        领域对象。该查询用于 PDF 视觉证据等精确来源读取，不产生额外 N+1。
+
+        Args:
+            chunk_id: 稳定 Chunk 主键。
+
+        Returns:
+            已恢复 SourceLocator 和 Chunk metadata 的领域对象。
+
+        Raises:
+            ResourceNotFoundError: Chunk 不存在或所属 Document 已被级联删除。
+        """
+
+        async with self._session_factory() as session:
+            row = (
+                await session.execute(
+                    select(ChunkModel, DocumentModel.knowledge_base_id, DocumentModel.filename)
+                    .join(DocumentModel, DocumentModel.id == ChunkModel.document_id)
+                    .where(ChunkModel.id == chunk_id)
+                )
+            ).one_or_none()
+            if row is None:
+                raise ResourceNotFoundError("文档片段不存在")
+            model, knowledge_base_id, filename = row
+            return self._chunk(model, knowledge_base_id, filename)
+
     async def list_ready_document_ids(
         self,
         knowledge_base_id: str,
@@ -367,6 +586,39 @@ class Repository:
                 statement = statement.where(DocumentModel.id.in_(document_ids))
             result = await session.scalars(statement)
             return set(result)
+
+    async def list_ready_chunks(
+        self,
+        knowledge_base_id: str,
+        document_ids: Sequence[str],
+    ) -> list[Chunk]:
+        """批量返回指定 READY 文档的全部 Chunk，并保持文档、原文顺序。
+
+        全文总结需要章节覆盖，不能先用向量相似度截成 Top-K。这里从 PostgreSQL 事实表一次性
+        读取候选，既不会依赖可能过期的 Milvus 派生索引，也避免按文档逐个查询形成 N+1。
+        调用方必须先得到 READY 文档交集；本方法仍重复校验状态，防止两次读取间状态变化。
+        """
+
+        unique_document_ids = tuple(dict.fromkeys(document_ids))
+        if not unique_document_ids:
+            return []
+        async with self._session_factory() as session:
+            rows = list(
+                await session.execute(
+                    select(ChunkModel, DocumentModel.knowledge_base_id, DocumentModel.filename)
+                    .join(DocumentModel, DocumentModel.id == ChunkModel.document_id)
+                    .where(
+                        DocumentModel.knowledge_base_id == knowledge_base_id,
+                        DocumentModel.status == DocumentStatus.READY.value,
+                        DocumentModel.id.in_(unique_document_ids),
+                    )
+                    .order_by(DocumentModel.created_at, ChunkModel.chunk_index)
+                )
+            )
+        return [
+            self._chunk(model, row_knowledge_base_id, filename)
+            for model, row_knowledge_base_id, filename in rows
+        ]
 
     async def get_chunks_with_neighbors(
         self,
@@ -600,6 +852,43 @@ class Repository:
             created_at=Repository._datetime(model.created_at),
             updated_at=Repository._datetime(model.updated_at),
         )
+
+    @staticmethod
+    def _chat_session(model: ChatSessionModel) -> ChatSession:
+        """把 ORM 会话恢复为不依赖 SQLAlchemy 的领域快照。"""
+
+        return ChatSession(
+            id=model.id,
+            knowledge_base_id=model.knowledge_base_id,
+            title=model.title,
+            memory_summary=model.memory_summary,
+            memory_through_sequence=model.memory_through_sequence,
+            created_at=Repository._datetime(model.created_at),
+            updated_at=Repository._datetime(model.updated_at),
+        )
+
+    @staticmethod
+    def _chat_message(model: ChatMessageModel) -> ChatMessage:
+        """把消息角色与状态字符串恢复为受控枚举。"""
+
+        return ChatMessage(
+            id=model.id,
+            session_id=model.session_id,
+            sequence=model.sequence,
+            role=ChatRole(model.role),
+            status=ChatMessageStatus(model.status),
+            content=model.content,
+            error_message=model.error_message,
+            created_at=Repository._datetime(model.created_at),
+            updated_at=Repository._datetime(model.updated_at),
+        )
+
+    @staticmethod
+    def _chat_title(question: str) -> str:
+        """使用首问生成确定性标题，避免为展示名称额外调用模型。"""
+
+        compact = " ".join(question.split())
+        return compact if len(compact) <= 40 else f"{compact[:40]}…"
 
     @staticmethod
     def _datetime(value: datetime | None) -> datetime:

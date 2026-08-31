@@ -24,8 +24,14 @@ import logging
 from collections.abc import Awaitable, Sequence
 from dataclasses import replace
 
+from ultimate_rag.application.summary_retrieval import (
+    SummaryEvidenceSelector,
+    detect_retrieval_intent,
+)
 from ultimate_rag.domain.models import (
+    BlockType,
     Chunk,
+    RetrievalIntent,
     RetrievalMode,
     RetrievalOptions,
     RetrievalResult,
@@ -54,6 +60,8 @@ class RetrievalService:
         rrf_k: int = 60,
         parent_window: int = 1,
         parent_max_tokens: int = 1536,
+        summary_max_chunks: int = 24,
+        summary_max_tokens: int = 16_000,
     ) -> None:
         """注入高级检索组件并验证不会绕过 API 的部署级边界。"""
 
@@ -79,6 +87,10 @@ class RetrievalService:
         self._rrf_k = rrf_k
         self._parent_window = parent_window
         self._parent_max_tokens = parent_max_tokens
+        self._summary_selector = SummaryEvidenceSelector(
+            max_chunks=summary_max_chunks,
+            max_tokens=summary_max_tokens,
+        )
 
     async def search(
         self,
@@ -98,6 +110,8 @@ class RetrievalService:
         query: str,
         top_k: int,
         options: RetrievalOptions | None = None,
+        *,
+        conversation_context: str | None = None,
     ) -> RetrievalRun:
         """执行一次可降级、可解释的高级检索。
 
@@ -132,9 +146,32 @@ class RetrievalService:
         )
         if not ready_document_ids:
             return self._empty_run(normalized_query, selected, fallback_reasons)
-        pushed_document_ids = (
-            tuple(sorted(ready_document_ids)) if selected.document_ids else ()
-        )
+        pushed_document_ids = tuple(sorted(ready_document_ids)) if selected.document_ids else ()
+
+        # 全文总结不依赖一句泛化 Query 与局部 Chunk 的相似度。直接覆盖 READY 文档结构，
+        # 可稳定带回摘要、方法、实验和结论，并避免参考文献被 Reranker 当作关键词密集证据。
+        intent = detect_retrieval_intent(normalized_query)
+        if intent is RetrievalIntent.DOCUMENT_SUMMARY:
+            chunks = await self._repository.list_ready_chunks(
+                knowledge_base_id,
+                tuple(sorted(ready_document_ids)),
+            )
+            results = self._summary_selector.select(chunks)
+            return RetrievalRun(
+                results=tuple(results),
+                trace=RetrievalTrace(
+                    original_query=normalized_query,
+                    query_variants=(normalized_query,),
+                    mode=selected.mode,
+                    candidate_count=len(chunks),
+                    result_count=len(results),
+                    rewrite_applied=False,
+                    rerank_applied=False,
+                    parent_expansion_applied=False,
+                    intent=intent,
+                    strategy="structural_coverage",
+                ),
+            )
 
         # 阶段 2 — Query Rewrite：原查询永远位于 variants[0]。辅助模型返回相同文本、无输出或
         # 调用失败时都不会丢失基础查询；异常被记录为显式降级，而不是静默吞掉。
@@ -144,7 +181,15 @@ class RetrievalService:
                 fallback_reasons.append("query_rewriter_unavailable")
             else:
                 try:
-                    rewritten = await self._query_rewriter.rewrite(normalized_query)
+                    if conversation_context:
+                        rewritten = await self._query_rewriter.rewrite(
+                            normalized_query,
+                            conversation_context,
+                        )
+                    else:
+                        # 不携带会话时沿用原端口调用形状，避免要求已有自定义 Rewriter
+                        # 为一个永远为空的可选参数同步升级。
+                        rewritten = await self._query_rewriter.rewrite(normalized_query)
                     if rewritten:
                         normalized_rewritten = " ".join(rewritten.split())
                         if len(normalized_rewritten) > 4000:
@@ -249,6 +294,15 @@ class RetrievalService:
                     exc_info=True,
                 )
                 fallback_reasons.append("parent_expansion_failed")
+
+        # Milvus 只保存检索必需字段；Block 类型属于 PostgreSQL Chunk 事实。最终结果在此批量
+        # 补齐，前端才能把 TABLE/IMAGE 命中显示为专用证据模块而不迁移现有向量集合。
+        if candidates and any(not result.content_types for result in candidates):
+            try:
+                candidates = await self._attach_content_types(candidates)
+            except Exception:
+                # 类型标签与预览属于解释层增强，读取失败不能让已完成的核心问答不可用。
+                logger.warning("Chunk content type enrichment failed", exc_info=True)
 
         trace = RetrievalTrace(
             original_query=normalized_query,
@@ -369,7 +423,11 @@ class RetrievalService:
             selected = self._select_parent_window(matched, siblings)
             if len(selected) <= 1:
                 expanded.append(
-                    replace(result, context_chunk_ids=(result.chunk_id,))
+                    replace(
+                        result,
+                        context_chunk_ids=(result.chunk_id,),
+                        content_types=self._content_types(matched),
+                    )
                 )
                 continue
             has_expansion = True
@@ -379,9 +437,49 @@ class RetrievalService:
                     content="\n\n".join(chunk.content for chunk in selected),
                     matched_content=result.content,
                     context_chunk_ids=tuple(chunk.id for chunk in selected),
+                    # 视觉证据锚定真正命中的 Child；邻居含图片不能把正文命中误标为图片。
+                    content_types=self._content_types(matched),
                 )
             )
         return expanded, has_expansion
+
+    async def _attach_content_types(
+        self,
+        results: list[RetrievalResult],
+    ) -> list[RetrievalResult]:
+        """通过一批事实查询补齐命中块类型；不存在的旧 Chunk 保持兼容空值。"""
+
+        contexts = await self._repository.get_chunks_with_neighbors(
+            [result.chunk_id for result in results],
+            window=0,
+        )
+        enriched: list[RetrievalResult] = []
+        for result in results:
+            chunks = contexts.get(result.chunk_id, [])
+            matched = next((chunk for chunk in chunks if chunk.id == result.chunk_id), None)
+            enriched.append(
+                replace(result, content_types=self._content_types(matched))
+                if matched is not None
+                else result
+            )
+        return enriched
+
+    @staticmethod
+    def _content_types(chunk: Chunk) -> tuple[BlockType, ...]:
+        """把不可信 JSONB 字符串恢复为去重、稳定排序的领域枚举。"""
+
+        raw_values = chunk.metadata.get("block_types")
+        if not isinstance(raw_values, list):
+            return ()
+        values: set[BlockType] = set()
+        for raw_value in raw_values:
+            if not isinstance(raw_value, str):
+                continue
+            try:
+                values.add(BlockType(raw_value))
+            except ValueError:
+                continue
+        return tuple(sorted(values, key=lambda value: value.value))
 
     def _select_parent_window(self, matched: Chunk, siblings: Sequence[Chunk]) -> list[Chunk]:
         """优先保留命中，再按距离加入邻居，并以原文顺序输出。"""

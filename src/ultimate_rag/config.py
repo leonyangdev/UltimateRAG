@@ -83,6 +83,15 @@ class Settings(BaseSettings):
     retrieval_parent_window: int = Field(default=1, ge=0, le=3)
     retrieval_parent_max_tokens: int = Field(default=1536, ge=64, le=8192)
     context_max_chars: int = 12000
+    # 全文总结按章节覆盖更多互补证据，使用独立预算，不能受普通问答 top_k=5 限制。
+    summary_max_chunks: int = Field(default=24, ge=4, le=100)
+    summary_max_tokens: int = Field(default=16_000, ge=1024, le=100_000)
+    summary_context_max_chars: int = Field(default=64_000, ge=4000, le=400_000)
+
+    # 原始消息永久保存在 PostgreSQL；Prompt 只携带递归摘要与最近消息，避免会话无限增长。
+    chat_recent_token_budget: int = Field(default=6000, ge=512, le=100_000)
+    chat_memory_max_tokens: int = Field(default=1600, ge=256, le=8192)
+    chat_generation_stale_seconds: int = Field(default=600, ge=60, le=7200)
 
     # PostgreSQL 持久化队列采用有限重试与租约回收，不允许无限重试或永久 RUNNING。
     ingestion_job_max_attempts: int = Field(default=3, ge=1, le=10)
@@ -120,9 +129,7 @@ class Settings(BaseSettings):
         if self.chunk_overlap_tokens >= self.chunk_max_tokens:
             raise ValueError("chunk_overlap_tokens must be smaller than chunk_max_tokens")
         if self.retrieval_parent_max_tokens < self.chunk_max_tokens:
-            raise ValueError(
-                "retrieval_parent_max_tokens must be at least chunk_max_tokens"
-            )
+            raise ValueError("retrieval_parent_max_tokens must be at least chunk_max_tokens")
         if self.worker_heartbeat_seconds >= self.worker_lease_seconds:
             raise ValueError("worker_heartbeat_seconds must be smaller than worker_lease_seconds")
         return self

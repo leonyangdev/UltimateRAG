@@ -38,6 +38,21 @@ class IngestionJobStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class ChatRole(StrEnum):
+    """持久化会话允许进入模型上下文的角色。"""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class ChatMessageStatus(StrEnum):
+    """一次生成的提交状态；PENDING 同时承担单会话并发闸门。"""
+
+    PENDING = "PENDING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+
+
 class BlockType(StrEnum):
     """统一文档模型中可由不同 Parser 产生的语义块类型。"""
 
@@ -56,6 +71,17 @@ class RetrievalMode(StrEnum):
     DENSE = "dense"
     SPARSE = "sparse"
     HYBRID = "hybrid"
+
+
+class RetrievalIntent(StrEnum):
+    """决定检索证据组织方式的用户任务意图。
+
+    普通事实问答需要按相关性收敛到少量证据；全文总结需要跨章节覆盖。两者若共用同一个
+    Top-K 排名，摘要、实验和结论很容易被局部高相似片段或参考文献挤出上下文。
+    """
+
+    FACT = "fact"
+    DOCUMENT_SUMMARY = "document_summary"
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +269,18 @@ class RetrievalResult:
     retrieval_sources: tuple[str, ...] = ()
     matched_content: str | None = None
     context_chunk_ids: tuple[str, ...] = ()
+    # 类型来自 PostgreSQL Chunk 事实而不是 Milvus 派生索引。前端据此区分正文、表格和
+    # 图片语义块；新增默认值保持旧索引与第三方 VectorStore 实现向后兼容。
+    content_types: tuple[BlockType, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentPreview:
+    """从原始文档可信定位渲染出的只读证据预览。"""
+
+    content: bytes
+    media_type: str
+    etag: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +304,8 @@ class RetrievalTrace:
     rerank_applied: bool
     parent_expansion_applied: bool
     fallback_reasons: tuple[str, ...] = ()
+    intent: RetrievalIntent = RetrievalIntent.FACT
+    strategy: str = "ranked_retrieval"
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,3 +373,41 @@ class IngestionJob:
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSession:
+    """绑定单个知识库的持久化对话及其派生长期记忆。"""
+
+    id: str
+    knowledge_base_id: str
+    title: str
+    memory_summary: str
+    memory_through_sequence: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChatMessage:
+    """会话中的原始消息事实；摘要只做缓存，不能替代这些记录。"""
+
+    id: str
+    session_id: str
+    sequence: int
+    role: ChatRole
+    status: ChatMessageStatus
+    content: str
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurn:
+    """原子开启的一轮对话及生成前已经完成的历史消息。"""
+
+    session: ChatSession
+    user_message: ChatMessage
+    assistant_message: ChatMessage
+    history: tuple[ChatMessage, ...]

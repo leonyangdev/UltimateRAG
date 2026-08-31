@@ -38,6 +38,12 @@ class DocumentBusyError(UltimateRAGError):
     pass
 
 
+class ChatSessionBusyError(UltimateRAGError):
+    """同一会话已有生成进行中，拒绝并发写入破坏消息顺序。"""
+
+    pass
+
+
 class ExternalServiceError(UltimateRAGError):
     """外部基础设施或模型服务发生可识别故障。"""
 

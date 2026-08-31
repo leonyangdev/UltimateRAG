@@ -1,8 +1,17 @@
-import { BookOpen, ChevronDown, GitMerge, TriangleAlert } from "lucide-react";
+"use client";
+
+/* PDF 预览来自运行时 API 且尺寸由原文 BBox 决定，无法满足 next/image 的静态尺寸契约。 */
+/* eslint-disable @next/next/no-img-element */
+
+import { useState } from "react";
+import { BookOpen, ChevronDown, GitMerge, ImageIcon, Table2, TriangleAlert } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import {
+  API_URL,
   formatLocator,
   type Citation,
   type RetrievalResult,
@@ -25,6 +34,49 @@ const fallbackLabels: Record<string, string> = {
   rerank_failed: "重排失败，已保留融合顺序",
   parent_expansion_failed: "上下文扩展失败，已使用命中块",
 };
+
+interface EvidencePreviewProps {
+  result: RetrievalResult;
+}
+
+/**
+ * 延迟加载 PDF 命中区域。预览失败只影响辅助证据，不隐藏已经召回的结构化文本。
+ */
+function EvidencePreview({ result }: EvidencePreviewProps) {
+  const [failed, setFailed] = useState(false);
+  if (!result.preview_url || failed) return null;
+
+  const isImage = result.content_types.includes("IMAGE");
+  const isTable = result.content_types.includes("TABLE");
+  const label = isImage ? "PDF 图片原文" : isTable ? "PDF 表格原文" : "PDF 原文区域";
+
+  return (
+    <figure className="overflow-hidden rounded-lg border border-border/80 bg-background">
+      <div className="flex items-center gap-2 border-b border-border/70 px-3 py-2 text-xs font-medium text-muted-foreground">
+        {isTable ? <Table2 className="size-3.5" /> : <ImageIcon className="size-3.5" />}
+        {label}
+      </div>
+      <a
+        href={`${API_URL}${result.preview_url}`}
+        target="_blank"
+        rel="noreferrer"
+        className="block bg-white"
+        title="在新窗口查看原文证据"
+      >
+        <img
+          src={`${API_URL}${result.preview_url}`}
+          alt={`${result.filename} ${label}`}
+          loading="lazy"
+          onError={() => setFailed(true)}
+          className="max-h-[32rem] w-full object-contain"
+        />
+      </a>
+      <figcaption className="border-t border-border/70 px-3 py-2 text-xs text-muted-foreground">
+        由原 PDF 的页码与版面坐标本地裁切；点击可查看大图。
+      </figcaption>
+    </figure>
+  );
+}
 
 /**
  * 展示可追溯的检索证据，而不是只给用户一个不可验证的模型答案。
@@ -58,12 +110,18 @@ export function RetrievalEvidence({
               <div className="flex flex-wrap items-center gap-2">
                 <GitMerge className="size-4 text-primary" />
                 <Badge variant="secondary">{trace.mode.toUpperCase()}</Badge>
+                <Badge variant="outline">
+                  {trace.intent === "document_summary" ? "全文总结" : "事实问答"}
+                </Badge>
                 <span className="text-muted-foreground">
                   {trace.candidate_count} 个候选 → {trace.result_count} 个结果
                 </span>
                 {trace.rewrite_applied && <Badge variant="outline">Query Rewrite</Badge>}
                 {trace.rerank_applied && <Badge variant="outline">Rerank</Badge>}
                 {trace.parent_expansion_applied && <Badge variant="outline">Small2Big</Badge>}
+                {trace.strategy === "structural_coverage" && (
+                  <Badge variant="outline">章节覆盖</Badge>
+                )}
               </div>
               {trace.query_variants.length > 1 && (
                 <p className="text-muted-foreground">
@@ -118,6 +176,16 @@ export function RetrievalEvidence({
                       {source}
                     </Badge>
                   ))}
+                  {result.content_types.includes("IMAGE") && (
+                    <Badge variant="secondary" className="gap-1 text-xs">
+                      <ImageIcon className="size-3" /> 图片
+                    </Badge>
+                  )}
+                  {result.content_types.includes("TABLE") && (
+                    <Badge variant="secondary" className="gap-1 text-xs">
+                      <Table2 className="size-3" /> 表格
+                    </Badge>
+                  )}
                   {result.dense_score !== null && (
                     <Badge variant="outline" className="font-mono text-xs">
                       Dense {result.dense_score.toFixed(4)}
@@ -139,9 +207,12 @@ export function RetrievalEvidence({
                     </Badge>
                   )}
                 </div>
-                <p className="line-clamp-4 whitespace-pre-wrap text-base leading-7 text-muted-foreground">
-                  {result.content}
-                </p>
+                <EvidencePreview result={result} />
+                <div className="prose-chat max-h-72 overflow-auto text-sm leading-7 text-muted-foreground [&_table]:text-sm">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {result.matched_content ?? result.content}
+                  </ReactMarkdown>
+                </div>
               </CardContent>
             </Card>
           );

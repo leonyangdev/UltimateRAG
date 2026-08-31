@@ -4,7 +4,7 @@
 
 ## 1. 这一层是什么
 
-Infrastructure 层是**外部依赖的具体实现**：PostgreSQL、MinIO、Milvus、模型 API 都在这里被适配成领域端口。它被 Domain 反向依赖（Domain 定义端口，Infrastructure 实现端口）。
+Infrastructure 层是**外部依赖的具体实现**：PostgreSQL、MinIO、Milvus、PDFium、模型 API 都在这里被适配成领域端口。它被 Domain 反向依赖（Domain 定义端口，Infrastructure 实现端口）。
 
 ```text
 Interface
@@ -20,7 +20,7 @@ Infrastructure（PostgreSQL / MinIO / Milvus / 模型 API）
 
 ### 2.1 表结构（`database/models.py`）
 
-四个 SQLAlchemy 模型对应四张 PostgreSQL 表：
+六个 SQLAlchemy 模型对应六张 PostgreSQL 表：
 
 | 表 | 保存内容 | 关键约束 |
 |---|---|---|
@@ -28,6 +28,8 @@ Infrastructure（PostgreSQL / MinIO / Milvus / 模型 API）
 | `documents` | 文档元数据 + 处理状态 | `object_key` 唯一；级联 Chunk/任务 |
 | `ingestion_jobs` | 持久化任务 + 租约 | `document_id` 唯一；索引 `(status, available_at)` |
 | `chunks` | Chunk 事实（可重建 Milvus） | `heading_path` / `chunk_metadata` 用 JSONB |
+| `chat_sessions` | 会话标题、消息序号、递归摘要游标 | 按知识库索引 |
+| `chat_messages` | 完整用户/助手消息事实 | `(session_id, sequence)` 唯一 |
 
 关键设计：
 
@@ -73,6 +75,12 @@ delete(object_key)                       # 删除（键由应用生成）
 - `get()` 用 `finally` 保证 `response.close()` + `release_conn()`，防止连接池泄漏
 - **目标键只能由应用生成**，不能直接来自用户文件名（路径穿越防护）
 
+### 3.1 PDF 证据渲染（`pdf_preview.py`）
+
+`PDFiumPreviewRenderer` 实现 `PDFPreviewRenderer` 端口。它用服务端固定倍率和留白把可信
+`page + bbox` 转为 JPEG，坐标夹紧在真实页面范围内；CPU 栅格化通过 `asyncio.to_thread`
+执行。输入只来自 PostgreSQL Chunk 定位，外部 API 不允许传任意坐标或倍率。
+
 ## 4. 依赖装配（`runtime.py` —— Composition Root）
 
 `create_processing_runtime(settings)` 是 **API 与 Worker 共用的装配入口**：
@@ -102,7 +110,7 @@ def create_processing_runtime(settings) -> ProcessingRuntime:
 - **`close()`** 释放 SQLAlchemy 连接池
 - 不引入 DI 框架：当前依赖数量有限，显式装配即可
 
-## 5. 四个表里谁是真来源
+## 5. 三类存储里谁是真来源
 
 | 存储 | 是否真来源 | 说明 |
 |---|---|---|

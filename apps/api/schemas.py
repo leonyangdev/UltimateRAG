@@ -9,9 +9,12 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ultimate_rag.domain.models import (
+    ChatMessage,
+    ChatSession,
     Citation,
     Document,
     KnowledgeBase,
+    RetrievalIntent,
     RetrievalMode,
     RetrievalOptions,
     RetrievalResult,
@@ -191,6 +194,9 @@ class RetrievalResultResponse(BaseModel):
     retrieval_sources: list[str]
     matched_content: str | None
     context_chunk_ids: list[str]
+    content_types: list[str]
+    # 相对路径允许前端沿用当前 API Origin；只有带 PDF 页码的命中才提供预览入口。
+    preview_url: str | None
 
     @classmethod
     def from_domain(cls, value: RetrievalResult) -> "RetrievalResultResponse":
@@ -210,6 +216,12 @@ class RetrievalResultResponse(BaseModel):
             retrieval_sources=list(value.retrieval_sources),
             matched_content=value.matched_content,
             context_chunk_ids=list(value.context_chunk_ids),
+            content_types=[item.value for item in value.content_types],
+            preview_url=(
+                f"/api/chunks/{value.chunk_id}/preview"
+                if value.locator is not None and value.locator.page is not None
+                else None
+            ),
         )
 
 
@@ -225,6 +237,8 @@ class RetrievalTraceResponse(BaseModel):
     rerank_applied: bool
     parent_expansion_applied: bool
     fallback_reasons: list[str]
+    intent: RetrievalIntent
+    strategy: str
 
     @classmethod
     def from_domain(cls, value: RetrievalTrace) -> "RetrievalTraceResponse":
@@ -240,6 +254,8 @@ class RetrievalTraceResponse(BaseModel):
             rerank_applied=value.rerank_applied,
             parent_expansion_applied=value.parent_expansion_applied,
             fallback_reasons=list(value.fallback_reasons),
+            intent=value.intent,
+            strategy=value.strategy,
         )
 
 
@@ -254,7 +270,58 @@ class ChatRequest(RetrievalRequest):
     """RAG 问答请求；外部字段使用更符合产品语义的 ``question``。"""
 
     query: str = Field(min_length=1, max_length=4000, alias="question")
+    # 保持旧客户端无 session_id 时的无状态行为；新版页面始终显式传入持久化会话。
+    session_id: str | None = Field(default=None, min_length=36, max_length=36)
     model_config = ConfigDict(populate_by_name=True)
+
+
+class ChatSessionResponse(BaseModel):
+    """知识库历史会话列表项。"""
+
+    id: str
+    knowledge_base_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_domain(cls, value: ChatSession) -> "ChatSessionResponse":
+        return cls(
+            id=value.id,
+            knowledge_base_id=value.knowledge_base_id,
+            title=value.title,
+            created_at=value.created_at,
+            updated_at=value.updated_at,
+        )
+
+
+class ChatMessageResponse(BaseModel):
+    """恢复历史会话所需的稳定消息字段。"""
+
+    id: str
+    role: str
+    status: str
+    content: str
+    error_message: str | None
+    created_at: datetime
+
+    @classmethod
+    def from_domain(cls, value: ChatMessage) -> "ChatMessageResponse":
+        return cls(
+            id=value.id,
+            role=value.role.value,
+            status=value.status.value,
+            content=value.content,
+            error_message=value.error_message,
+            created_at=value.created_at,
+        )
+
+
+class ChatSessionDetailResponse(BaseModel):
+    """会话元数据及按序消息，用于刷新或选择历史会话。"""
+
+    session: ChatSessionResponse
+    messages: list[ChatMessageResponse]
 
 
 class CitationResponse(BaseModel):

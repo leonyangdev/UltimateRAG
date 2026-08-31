@@ -18,6 +18,8 @@ RetrievalService.retrieve
 RAGService：ContextBuilder → Citation
    ↓ BailianLLMClient.stream
 SSE：data-retrieval(trace + evidence) → text-delta × N → finish
+   ↓ 用户展开 PDF 证据
+Chunk ID → PostgreSQL Locator → MinIO 原 PDF → PDFium 局部 JPEG
 ```
 
 ## 2. HTTP 边界
@@ -94,6 +96,10 @@ start → start-step
 
 证据、Trace 与文本属于同一条 assistant message。生成中断后 HTTP 状态已不能修改，Route 会记录
 堆栈并只发送稳定错误文案，不把供应商响应或凭据暴露给浏览器。
+
+PDF 命中的 `content_types` 来自 PostgreSQL Chunk 事实，不依赖 Milvus 扩展字段；前端会把 TABLE
+正文按 GFM 表格渲染，并在用户展开时通过 `preview_url` 加载原 PDF 页面的 BBox 截图。该读取链路
+只使用 MinIO + 本地 PDFium，不再次调用百炼 OCR/Vision。
 
 ## 9. 为什么仍不用 LangGraph
 

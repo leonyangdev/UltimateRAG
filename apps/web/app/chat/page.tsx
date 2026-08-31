@@ -11,7 +11,9 @@ import {
   ChevronDown,
   CircleAlert,
   LoaderCircle,
+  History,
   MessageSquare,
+  Plus,
   Search,
   Send,
   SlidersHorizontal,
@@ -21,6 +23,8 @@ import {
 import {
   api,
   API_URL,
+  ChatSession,
+  ChatSessionDetail,
   DocumentItem,
   KnowledgeBase,
   RAGMessage as RAGMessageType,
@@ -28,6 +32,7 @@ import {
   RetrievalMode,
   RetrievalResult,
   RetrievalTrace,
+  toRAGMessages,
 } from "@/app/lib";
 import { RAGMessage } from "@/components/rag-message";
 import { RetrievalEvidence } from "@/components/retrieval-evidence";
@@ -75,6 +80,10 @@ type Mode = "chat" | "retrieval";
 export default function ChatPage() {
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSession, setActiveSession] = useState<ChatSession | null>(null);
+  const [initialSessionMessages, setInitialSessionMessages] = useState<RAGMessageType[]>([]);
+  const [isLoadingSession, setIsLoadingSession] = useState(false);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   // 记录 documents 当前归属的知识库。「已选择但尚未加载完成」由二者差异推导，
   // 避免在 effect 体内同步 setState（React 新规范不推荐，会触发级联渲染）。
@@ -92,6 +101,8 @@ export default function ChatPage() {
   const [isLoadingKnowledgeBases, setIsLoadingKnowledgeBases] = useState(true);
   const [isRetrieving, setIsRetrieving] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // React 开发模式会重复执行 Effect。记录已经初始化的知识库，避免一次进入产生两个空会话。
+  const initializedKnowledgeBaseRef = useRef<string | null>(null);
 
   // Transport 只创建一次。每次提问的 question 放进 sendMessage options，避免闭包保存旧输入，
   // 也让 AI SDK 继续负责取消、请求状态机和 Message Part 的增量合并。
@@ -108,7 +119,11 @@ export default function ChatPage() {
     status: chatStatus,
     error: chatError,
     stop,
-  } = useChat<RAGMessageType>({ id: `knowledge-base-chat-${selectedId ?? "none"}`, transport });
+  } = useChat<RAGMessageType>({
+    id: activeSession?.id ?? "new-chat-pending",
+    messages: initialSessionMessages,
+    transport,
+  });
 
   const isChatWorking = chatStatus === "submitted" || chatStatus === "streaming";
   const hasReadyDocument = documents.some((document) => document.status === "READY");
@@ -124,8 +139,13 @@ export default function ChatPage() {
       .then((values) => {
         if (!isActive) return;
         setKnowledgeBases(values);
-        // 默认选中第一个知识库，让页面打开即可提问；切换完全由选择器驱动。
-        setSelectedId((current) => current ?? values[0]?.id ?? null);
+        // 从知识库工作台进入时优先使用 URL 指定范围；直接打开 /chat 则回退到第一项。
+        // 参数只能在已加载列表中匹配，不能让任意外部字符串进入后续请求路径。
+        const requestedId = new URLSearchParams(window.location.search).get("knowledge_base_id");
+        const initialId = values.some((item) => item.id === requestedId)
+          ? requestedId
+          : values[0]?.id ?? null;
+        setSelectedId((current) => current ?? initialId);
       })
       .catch((value: unknown) => {
         if (isActive) setPageError(value instanceof Error ? value.message : "知识库加载失败");
@@ -172,6 +192,35 @@ export default function ChatPage() {
   }, [selectedId]);
 
   useEffect(() => {
+    if (!selectedId || initializedKnowledgeBaseRef.current === selectedId) return;
+    initializedKnowledgeBaseRef.current = selectedId;
+    let isActive = true;
+    setIsLoadingSession(true);
+
+    // 每次进入知识库都创建一个新会话，同时加载历史列表。两项互不依赖，并发执行可减少等待。
+    void Promise.all([
+      api<ChatSession[]>(`/api/knowledge-bases/${selectedId}/chat-sessions`),
+      api<ChatSession>(`/api/knowledge-bases/${selectedId}/chat-sessions`, { method: "POST" }),
+    ])
+      .then(([history, created]) => {
+        if (!isActive) return;
+        setSessions([created, ...history.filter((session) => session.id !== created.id)]);
+        setActiveSession(created);
+        setInitialSessionMessages([]);
+      })
+      .catch((value: unknown) => {
+        if (isActive) setPageError(value instanceof Error ? value.message : "会话创建失败");
+      })
+      .finally(() => {
+        if (isActive) setIsLoadingSession(false);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [selectedId]);
+
+  useEffect(() => {
     // 流式阶段每次 Message Part 增长后跟随到底部，让新 token 始终保持可见。
     messagesEndRef.current?.scrollIntoView({
       behavior: chatStatus === "streaming" ? "smooth" : "auto",
@@ -186,18 +235,72 @@ export default function ChatPage() {
   function selectKnowledgeBase(id: string) {
     if (id === selectedId) return;
     if (isChatWorking) stop();
+    initializedKnowledgeBaseRef.current = null;
     setSelectedId(id);
+    setActiveSession(null);
+    setSessions([]);
+    setInitialSessionMessages([]);
     setRetrievalResults([]);
     setRetrievalTrace(null);
     setSelectedDocumentIds([]);
     setPageError("");
   }
 
+  /** 显式开始新会话；空会话也持久化，刷新后仍可从历史列表看到。 */
+  async function createNewSession() {
+    if (!selectedId || isLoadingSession) return;
+    if (isChatWorking) stop();
+    setIsLoadingSession(true);
+    try {
+      const created = await api<ChatSession>(
+        `/api/knowledge-bases/${selectedId}/chat-sessions`,
+        { method: "POST" },
+      );
+      setSessions((current) => [created, ...current.filter((item) => item.id !== created.id)]);
+      setActiveSession(created);
+      setInitialSessionMessages([]);
+      setPageError("");
+    } catch (value) {
+      setPageError(value instanceof Error ? value.message : "新建会话失败");
+    } finally {
+      setIsLoadingSession(false);
+    }
+  }
+
+  /** 选择历史会话并从 PostgreSQL 恢复消息，而不是依赖浏览器临时状态。 */
+  async function openHistorySession(sessionId: string) {
+    if (!sessionId || sessionId === activeSession?.id) return;
+    if (isChatWorking) stop();
+    setIsLoadingSession(true);
+    try {
+      const detail = await api<ChatSessionDetail>(`/api/chat-sessions/${sessionId}`);
+      if (detail.session.knowledge_base_id !== selectedId) {
+        throw new Error("历史会话不属于当前知识库");
+      }
+      setActiveSession(detail.session);
+      setInitialSessionMessages(toRAGMessages(detail.messages));
+      setPageError("");
+    } catch (value) {
+      setPageError(value instanceof Error ? value.message : "历史会话加载失败");
+    } finally {
+      setIsLoadingSession(false);
+    }
+  }
+
+  async function refreshSessions(knowledgeBaseId: string) {
+    const values = await api<ChatSession[]>(
+      `/api/knowledge-bases/${knowledgeBaseId}/chat-sessions`,
+    );
+    setSessions(values);
+    const current = values.find((session) => session.id === activeSession?.id);
+    if (current) setActiveSession(current);
+  }
+
   /** 根据当前模式发送真实流式问答，或执行不依赖 LLM 的检索调试。 */
   async function submitQuestion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const normalizedQuestion = question.trim();
-    if (!normalizedQuestion || !selectedId || !hasReadyDocument) return;
+    if (!normalizedQuestion || !selectedId || !activeSession || !hasReadyDocument) return;
     setPageError("");
     const retrievalOptions = {
       mode: retrievalMode,
@@ -210,17 +313,23 @@ export default function ChatPage() {
 
     if (mode === "chat") {
       setQuestion("");
-      await sendMessage(
-        { text: normalizedQuestion },
-        {
-          body: {
-            knowledge_base_id: selectedId,
-            question: normalizedQuestion,
-            top_k: 5,
-            ...retrievalOptions,
+      try {
+        await sendMessage(
+          { text: normalizedQuestion },
+          {
+            body: {
+              knowledge_base_id: selectedId,
+              session_id: activeSession.id,
+              question: normalizedQuestion,
+              top_k: 5,
+              ...retrievalOptions,
+            },
           },
-        },
-      );
+        );
+        await refreshSessions(selectedId);
+      } catch (value) {
+        setPageError(value instanceof Error ? value.message : "问答请求失败");
+      }
       return;
     }
 
@@ -272,6 +381,29 @@ export default function ChatPage() {
           <p className="hidden text-sm text-muted-foreground sm:block">
             {mode === "chat" ? "回答与证据通过同一条流返回" : "观察召回、融合、重排与上下文扩展"}
           </p>
+          {mode === "chat" && selectedId && (
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <History className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <select
+                  value={activeSession?.id ?? ""}
+                  onChange={(event) => void openHistorySession(event.target.value)}
+                  disabled={isLoadingSession}
+                  aria-label="选择历史会话"
+                  className="h-8 max-w-52 rounded-md border border-border bg-background pl-8 pr-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+                >
+                  {sessions.map((session) => (
+                    <option key={session.id} value={session.id}>
+                      {session.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <Button type="button" size="sm" variant="outline" onClick={() => void createNewSession()} disabled={isLoadingSession}>
+                <Plus className="size-3.5" /> 新会话
+              </Button>
+            </div>
+          )}
         </div>
 
         {/* 高级检索配置同时作用于问答和独立调试。保持原生表单控件可以直接获得键盘、
@@ -525,7 +657,7 @@ export default function ChatPage() {
                           ? "询问所选知识库中的内容…"
                           : "输入查询，观察向量召回结果…"
                 }
-                disabled={!selectedId || !hasReadyDocument}
+                disabled={!selectedId || !activeSession || !hasReadyDocument || isLoadingSession}
                 className="min-h-[52px] max-h-32 resize-none border-0 bg-transparent px-3 py-2 shadow-none focus-visible:ring-0"
               />
               <div className="flex items-center justify-between gap-3 px-2 pb-1">
@@ -538,7 +670,7 @@ export default function ChatPage() {
                   <Button
                     type="submit"
                     size="sm"
-                    disabled={!question.trim() || !selectedId || !hasReadyDocument || isRetrieving}
+                    disabled={!question.trim() || !selectedId || !activeSession || !hasReadyDocument || isRetrieving || isLoadingSession}
                   >
                     {mode === "chat" ? <Send className="size-3.5" /> : <Search className="size-3.5" />}
                     {mode === "chat" ? "发送" : "检索"}
