@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from ultimate_rag.domain.models import (
     BlockType,
+    DocumentAsset,
     RetrievalMode,
     RetrievalOptions,
     RetrievalResult,
@@ -77,8 +78,25 @@ def test_pdf_retrieval_result_exposes_visual_evidence_metadata() -> None:
             score=0.9,
             locator=SourceLocator(page=8, bbox=(10.0, 20.0, 200.0, 120.0)),
             content_types=(BlockType.TABLE,),
+            assets=(
+                DocumentAsset(
+                    id="asset-1",
+                    document_id="doc-1",
+                    block_id="block-1",
+                    kind=BlockType.IMAGE,
+                    object_key="kb/doc/assets/asset-1.jpg",
+                    media_type="image/jpeg",
+                    filename="asset-1.jpg",
+                    title="Transformer 架构图",
+                    description="Encoder 与 Decoder",
+                    sha256="abc",
+                    locator=SourceLocator(page=8),
+                ),
+            ),
         )
     )
 
     assert response.content_types == ["TABLE"]
     assert response.preview_url == "/api/chunks/chunk-1/preview"
+    assert response.assets[0].content_url == "/api/assets/asset-1/content"
+    assert response.assets[0].model_dump().get("object_key") is None

@@ -1,4 +1,4 @@
-"""MinIO 原始文件存储适配器。
+"""MinIO 原始文件与文档 Asset 存储适配器。
 
 MinIO Python SDK 是同步接口，因此所有网络操作都移入工作线程，避免阻塞 FastAPI 事件循环。
 """
@@ -30,7 +30,7 @@ class MinioObjectStorage:
         self._bucket = bucket
 
     async def ensure_bucket(self) -> None:
-        """幂等创建原始文档 Bucket。"""
+        """幂等创建原始文档与抽取 Asset 共用的私有 Bucket。"""
 
         def ensure() -> None:
             """在工作线程中调用同步 SDK 检查并创建 Bucket。"""
@@ -40,7 +40,7 @@ class MinioObjectStorage:
         await asyncio.to_thread(ensure)
 
     async def put(self, object_key: str, content: bytes, content_type: str) -> None:
-        """上传内存中的原始文档内容，并保存标准 MIME 类型。"""
+        """上传内存中的原始文档或受限 Asset，并保存标准 MIME 类型。"""
         await asyncio.to_thread(
             self._client.put_object,
             self._bucket,

@@ -29,6 +29,7 @@ export interface KnowledgeBase {
 export interface DocumentItem {
   id: string;
   filename: string;
+  extension: string;
   status: string;
   error_message: string | null;
   parser_name: string | null;
@@ -44,6 +45,18 @@ export interface SourceLocator {
   sheet: string | null;
   cell_range: string | null;
   slide: number | null;
+}
+
+/** 摄取期从原文抽取、经受控 API 提供的可展示资源。 */
+export interface DocumentAsset {
+  id: string;
+  kind: "IMAGE";
+  media_type: string;
+  filename: string;
+  title: string;
+  description: string;
+  locator: SourceLocator | null;
+  content_url: string;
 }
 
 export interface RetrievalResult {
@@ -63,6 +76,7 @@ export interface RetrievalResult {
   context_chunk_ids: string[];
   content_types: Array<"HEADING" | "TEXT" | "CODE" | "LIST" | "QUOTE" | "TABLE" | "IMAGE">;
   preview_url: string | null;
+  assets: DocumentAsset[];
 }
 
 export type RetrievalMode = "dense" | "sparse" | "hybrid";
@@ -130,6 +144,11 @@ export interface ChatMessageRecord {
   content: string;
   error_message: string | null;
   created_at: string;
+  retrieval_evidence: {
+    citations: Citation[];
+    retrieval_results: RetrievalResult[];
+    retrieval_trace: RetrievalTrace;
+  } | null;
 }
 
 export interface ChatSessionDetail {
@@ -137,14 +156,12 @@ export interface ChatSessionDetail {
   messages: ChatMessageRecord[];
 }
 
-/** 将持久化消息恢复为 AI SDK UIMessage；历史证据可在后续版本按消息独立存储。 */
+/** 将持久化正文与证据恢复为 AI SDK UIMessage，刷新后仍能渲染图片和来源侧栏。 */
 export function toRAGMessages(records: ChatMessageRecord[]): RAGMessage[] {
   return records
     .filter((record) => record.status !== "PENDING")
-    .map((record) => ({
-      id: record.id,
-      role: record.role,
-      parts: [
+    .map((record) => {
+      const parts: RAGMessage["parts"] = [
         {
           type: "text" as const,
           text:
@@ -152,8 +169,12 @@ export function toRAGMessages(records: ChatMessageRecord[]): RAGMessage[] {
               ? record.error_message || "这次回答未完成，请重新提问。"
               : record.content,
         },
-      ],
-    }));
+      ];
+      if (record.role === "assistant" && record.retrieval_evidence) {
+        parts.push({ type: "data-retrieval", data: record.retrieval_evidence });
+      }
+      return { id: record.id, role: record.role, parts };
+    });
 }
 
 /**

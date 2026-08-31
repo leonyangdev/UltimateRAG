@@ -7,7 +7,7 @@
 | 存储 | 保存什么 | 角色定位 |
 |---|---|---|
 | **PostgreSQL** | 业务**事实**数据 | 事实来源（Source of Truth） |
-| **MinIO** | **原始文件** | 对象存储 |
+| **MinIO** | **原始文件 + 抽取图片 Asset** | 对象存储 |
 | **Milvus** | **Dense 向量与 BM25 稀疏索引** | 派生索引（Derived Index） |
 
 ```text
@@ -26,6 +26,9 @@ knowledge_bases   知识库
 documents         文档元数据 + 处理状态（PENDING/READY/FAILED）
 ingestion_jobs    后台任务（领取/重试/完成）
 chunks            Chunk 事实（文本 + 元数据 + 来源定位）
+document_assets   图片资源事实（Block/Locator/Object Key/SHA-256）
+chat_sessions     会话与递归摘要游标
+chat_messages     完整消息 + 回答时检索证据 JSONB 快照
 ```
 
 **为什么 Chunk 文本也放 PostgreSQL？**
@@ -34,16 +37,20 @@ chunks            Chunk 事实（文本 + 元数据 + 来源定位）
 
 数据库 Schema 只通过 **Alembic Migration** 修改，应用启动不会自动建表。
 
-## 3. MinIO —— 原始文件
+## 3. MinIO —— 原始文件与二进制 Asset
 
-保存**原始文件**（Markdown / PDF / DOCX / XLSX / PPTX / 图片…）。
+保存原始文件（Markdown / PDF / DOCX / XLSX / PPTX / 图片…）以及 PDF Parser 已抽取的 JPEG。
 
 关键规则：
 
 - **对象键由系统生成**，不直接用用户文件名（防路径穿越、防覆盖）
 - 键格式：`{知识库ID}/{文档UUID}/source{扩展名}`
+- Asset 键格式：`{知识库ID}/{文档UUID}/assets/{稳定AssetID}.jpg`
 - 先存原文件再建业务记录：即使处理失败，也能用原文件排查或重建
 - 用户文件名只用于展示和扩展名判断
+
+原文件用于重建一切；Asset 是为了让答案和历史会话低延迟稳定展示的二进制事实。它仍然可以由
+原 PDF + Parser 重建，但不能放进 PostgreSQL JSONB 或 Milvus，避免数据库膨胀和检索索引污染。
 
 ## 4. Milvus —— Dense + Sparse 派生索引
 
@@ -77,9 +84,9 @@ MinIO 先存原文件
 PostgreSQL 建 Document + Job（同一事务）
    ↓
 Worker 处理：
-   Parse → Chunk
+   Parse → Chunk + 图片 Asset
    ↓
-PostgreSQL 写 Chunk 事实（事务）
+MinIO 写 Asset；PostgreSQL 写 Asset/Chunk 事实（各自幂等）
    ↓
 Milvus 顺序写 Dense 与 Sparse（delete_by_document + upsert + flush）
    ↓
@@ -104,7 +111,7 @@ PostgreSQL 二次过滤（只留 READY 文档）
 
 ```text
 1. 先删 Milvus 向量（派生索引）
-2. 再删 MinIO 原文件
+2. 再删 MinIO Asset 和原文件
 3. 最后删 PostgreSQL 事实
 ```
 
@@ -125,13 +132,13 @@ PostgreSQL 二次过滤（只留 READY 文档）
 ```text
 ┌─────────────────────────────┐
 │          MinIO              │
-│      原始文件（不可变）       │
+│   原始文件 + 图片 Asset       │
 └───────────┬─────────────────┘
             │ 上传时先保存
             ▼
 ┌─────────────────────────────┐       重建
 │       PostgreSQL            │ ──────────────────► ┌──────────────┐
-│  事实：知识库/文档/Chunk/任务 │                       │    Milvus    │
+│  事实：文档/Chunk/Asset/会话   │                       │    Milvus    │
 │  （业务状态 + 文本）          │ ◄────────────────── │  向量索引     │
 └─────────────────────────────┘   重新向量化        └──────────────┘
 ```

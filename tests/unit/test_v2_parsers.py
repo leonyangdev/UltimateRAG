@@ -274,6 +274,9 @@ async def test_pdf_parser_ocr_scan_page_and_keeps_page_number() -> None:
     assert parsed.blocks[0].locator is not None
     assert parsed.blocks[0].locator.page == 1
     assert parsed.metadata["ocr_page_count"] == 1
+    assert len(parsed.assets) == 1
+    assert parsed.assets[0].media_type == "image/jpeg"
+    assert f"asset://{parsed.assets[0].id}" in parsed.blocks[0].content
     assert ocr.mime_types == ["image/jpeg"]
 
 
@@ -395,8 +398,28 @@ async def test_pdf_parser_preserves_layout_table_picture_and_bbox() -> None:
     ]
     assert parsed.blocks[1].locator is not None
     assert parsed.blocks[1].locator.bbox == (10, 50, 300, 150)
-    assert parsed.blocks[2].content == (
-        "图片题注：系统架构\n\n架构图显示 API 指向 Worker。"
-    )
+    assert "![系统架构](asset://" in parsed.blocks[2].content
+    assert "图片题注：系统架构\n\n架构图显示 API 指向 Worker。" in parsed.blocks[2].content
     assert parsed.blocks[2].metadata["extraction"] == "bailian_vision"
+    assert parsed.blocks[2].metadata["asset_ids"] == [parsed.assets[0].id]
+    assert parsed.assets[0].block_id == parsed.blocks[2].id
+    assert parsed.assets[0].title == "系统架构"
+    assert parsed.assets[0].content == image.getvalue()
     assert parsed.metadata["table_count"] == 1
+    assert parsed.metadata["asset_count"] == 1
+
+
+def test_pdf_parser_limits_vision_fallback_title_for_accessibility() -> None:
+    """无题注图片不能把整段 Vision 描述当作卡片标题和 Markdown alt text。"""
+
+    element = _LayoutElement(
+        1,
+        2,
+        BlockType.IMAGE,
+        "",
+        SourceLocator(page=2),
+    )
+    title = PDFParser._asset_title(element, "这是一个很长的架构描述" * 30)
+
+    assert len(title) == 120
+    assert title.endswith("...")

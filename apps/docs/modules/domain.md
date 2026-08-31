@@ -37,9 +37,10 @@ class Chunk:
 - 状态枚举：`DocumentStatus`、`IngestionJobStatus`、`BlockType`
 - 值对象：`SourceLocator`（来源定位）
 - 实体：`KnowledgeBase`、`Document`、`IngestionJob`
-- 中间结果：`DocumentSource`、`Block`、`ParsedDocument`
+- 中间结果：`DocumentSource`、`Block`、`ParsedDocument`、`ParsedAsset`
 - 检索/引用：`Chunk`、`EmbeddedChunk`、`RetrievalResult`、`Citation`、`DocumentPreview`
-- 会话：`ChatSession`、`ChatMessage`、`ChatTurn`
+- 资源：`DocumentAsset`、`DocumentAssetContent`
+- 会话：`ChatSession`、`ChatMessage`、`ChatTurn`、`ChatEvidence`
 
 所有对象都是 `frozen=True`（不可变），保证跨层传递安全、便于测试。
 

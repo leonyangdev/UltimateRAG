@@ -10,6 +10,7 @@ from ultimate_rag.application import RetrievalService
 from ultimate_rag.domain.models import (
     BlockType,
     Chunk,
+    DocumentAsset,
     EmbeddedChunk,
     RerankResult,
     RetrievalMode,
@@ -118,9 +119,11 @@ class FakeRepository:
         *,
         ready_ids: set[str] | None = None,
         contexts: dict[str, list[Chunk]] | None = None,
+        assets: dict[str, DocumentAsset] | None = None,
     ) -> None:
         self.ready_ids = {"doc-1"} if ready_ids is None else ready_ids
         self.contexts = contexts or {}
+        self.assets = assets or {}
 
     async def list_ready_document_ids(
         self,
@@ -136,6 +139,14 @@ class FakeRepository:
         window: int,
     ) -> dict[str, list[Chunk]]:
         return {chunk_id: self.contexts.get(chunk_id, []) for chunk_id in chunk_ids}
+
+    async def get_document_assets(
+        self,
+        asset_ids: Sequence[str],
+    ) -> dict[str, DocumentAsset]:
+        return {
+            asset_id: self.assets[asset_id] for asset_id in asset_ids if asset_id in self.assets
+        }
 
 
 class FakeQueryRewriter:
@@ -360,6 +371,57 @@ async def test_parent_expansion_keeps_same_parent_and_token_budget() -> None:
     assert run.results[0].content_types == (BlockType.TABLE,)
     assert "下一节" not in run.results[0].content
     assert run.trace.parent_expansion_applied is True
+
+
+@pytest.mark.asyncio
+async def test_retrieval_attaches_registered_asset_without_putting_object_key_in_milvus() -> None:
+    """最终 IMAGE 命中应通过 PostgreSQL Asset ID 补齐资源，而不是依赖向量索引字段。"""
+
+    matched = Chunk(
+        id="a",
+        knowledge_base_id="kb-1",
+        document_id="doc-1",
+        index=0,
+        content="Transformer 架构图",
+        heading_path=("Architecture",),
+        token_count=10,
+        locator=SourceLocator(page=3),
+        metadata={"block_types": ["IMAGE"], "asset_ids": ["asset-1"]},
+    )
+    asset = DocumentAsset(
+        id="asset-1",
+        document_id="doc-1",
+        block_id="block-1",
+        kind=BlockType.IMAGE,
+        object_key="kb-1/doc-1/assets/asset-1.jpg",
+        media_type="image/jpeg",
+        filename="asset-1.jpg",
+        title="Transformer 架构图",
+        description="Encoder 与 Decoder",
+        sha256="abc",
+        locator=SourceLocator(page=3),
+    )
+    repository = FakeRepository(contexts={"a": [matched]}, assets={asset.id: asset})
+    service = RetrievalService(
+        cast(Embedder, FakeEmbedder()),
+        cast(VectorStore, FakeVectorStore()),
+        cast(Repository, repository),
+    )
+
+    run = await service.retrieve(
+        "kb-1",
+        "原始查询",
+        1,
+        RetrievalOptions(
+            mode=RetrievalMode.DENSE,
+            enable_query_rewrite=False,
+            enable_rerank=False,
+            enable_parent_expansion=False,
+        ),
+    )
+
+    assert run.results[0].content_types == (BlockType.IMAGE,)
+    assert run.results[0].assets == (asset,)
 
 
 def replace_chunk_id(chunk: Chunk, chunk_id: str) -> Chunk:

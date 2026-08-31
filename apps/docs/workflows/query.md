@@ -15,11 +15,12 @@ RetrievalService.retrieve
    ↓ RRF 融合多个排名列表
    ↓ optional qwen3-rerank
    ↓ optional Small2Big 同 Parent 相邻 Child
-RAGService：ContextBuilder → Citation
+PostgreSQL：按 Chunk.asset_ids 批量补齐 DocumentAsset
+   ↓ RAGService：ContextBuilder → Citation
    ↓ BailianLLMClient.stream
-SSE：data-retrieval(trace + evidence) → text-delta × N → finish
-   ↓ 用户展开 PDF 证据
-Chunk ID → PostgreSQL Locator → MinIO 原 PDF → PDFium 局部 JPEG
+SSE：data-retrieval(trace + assets) → text-delta × N → finish
+   ├─ asset://ID → 受控 Asset API → MinIO JPEG
+   └─ citation://N → 右侧来源栏 → Chunk/表格/PDF BBox 证据
 ```
 
 ## 2. HTTP 边界
@@ -84,6 +85,8 @@ COSINE/BM25 原始分数。融合后去重并截断 `candidate_k`。
 2. `ContextBuilder` 按排名和字符预算确定性编号 `[来源 N]`。
 3. 知识正文作为不可信数据放入 `<knowledge_context>`，System Prompt 要求忽略其中指令。
 4. Citation 从受控 `RetrievalResult` 构造，不解析模型自由文本。
+5. 图片资源以精确 `![标题](asset://ID)` 提供；模型只能复制 Context 已声明的 ID。
+6. 引用使用 `[来源 N](citation://N)`，前端按后端 Citation 顺序打开右侧来源栏。
 
 ## 8. SSE 与可解释数据
 
@@ -97,11 +100,26 @@ start → start-step
 证据、Trace 与文本属于同一条 assistant message。生成中断后 HTTP 状态已不能修改，Route 会记录
 堆栈并只发送稳定错误文案，不把供应商响应或凭据暴露给浏览器。
 
-PDF 命中的 `content_types` 来自 PostgreSQL Chunk 事实，不依赖 Milvus 扩展字段；前端会把 TABLE
-正文按 GFM 表格渲染，并在用户展开时通过 `preview_url` 加载原 PDF 页面的 BBox 截图。该读取链路
-只使用 MinIO + 本地 PDFium，不再次调用百炼 OCR/Vision。
+PDF 命中的 `content_types + assets` 来自 PostgreSQL 事实，不依赖 Milvus 扩展字段。前端有三条
+确定性渲染路径：
 
-## 9. 为什么仍不用 LangGraph
+| 回答内容 | 传输协议 | 展示方式 |
+|---|---|---|
+| 图片 | `asset://<id>` | 仅当 ID 存在于本消息 RetrievalResult 白名单时，映射受控 Asset API |
+| 表格 | GFM Markdown | 直接在答案或来源侧栏渲染原始行列数据 |
+| 引用 | `citation://N` | 点击打开右侧侧栏，展示文件、Locator、Chunk 和视觉预览 |
+
+任意公网图片不会自动加载，避免恶意文档通过图片 URL 泄露客户端 IP、Referer 或查询语义。图片
+Asset 已在摄取期调用过 Vision，查看时只读取 MinIO；表格/普通 PDF 区域仍可通过 `preview_url`
+使用本地 PDFium 按 BBox 裁切，不再次调用百炼。
+
+## 9. 历史会话为什么仍能打开来源
+
+一次助手回答正常完成时，正文和 `ChatEvidence` 在同一 PostgreSQL 事务提交。历史会话 API 返回
+消息正文以及当时的 Citation、RetrievalResult、Trace；前端恢复成同一 `data-retrieval` Message
+Part。因此刷新页面后不是重新检索，也不会因为索引后来改变而把旧回答指向另一批来源。
+
+## 10. 为什么仍不用 LangGraph
 
 链路虽有并发通道和降级，但阶段顺序确定、没有 Agent 决策或循环。普通 Python Service 更容易
 理解、单测和定位故障；框架应等真正出现状态图复杂度再引入。

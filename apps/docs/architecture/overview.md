@@ -105,7 +105,7 @@ runtime.py（Composition Root）
 │  (src/ultimate_rag/worker)│
 │                          │
 │ 领取 Job → Process：      │
-│  Parse → Chunk → Embed   │
+│ Parse → Chunk/Asset → Embed │
 │  → Index → READY         │
 └────────────┬──────────────┘
              │

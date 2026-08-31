@@ -36,6 +36,7 @@ class _Section:
     source_labels: set[str] = field(default_factory=set)
     extraction_methods: set[str] = field(default_factory=set)
     layout_engines: set[str] = field(default_factory=set)
+    asset_ids: set[str] = field(default_factory=set)
 
 
 class StructureAwareChunker:
@@ -94,11 +95,15 @@ class StructureAwareChunker:
                 source_labels = list[JsonValue](sorted(section.source_labels))
                 extraction_methods = list[JsonValue](sorted(section.extraction_methods))
                 layout_engines = list[JsonValue](sorted(section.layout_engines))
+                asset_ids = list[JsonValue](sorted(section.asset_ids))
                 metadata: dict[str, JsonValue] = {
                     "block_types": block_types,
                     "source_labels": source_labels,
                     "extraction_methods": extraction_methods,
                     "layout_engines": layout_engines,
+                    # 图片 Section 的稳定资源 ID 随 Chunk 进入 PostgreSQL；Milvus 无需新增
+                    # 二进制或 Object Key 字段，检索完成后再从事实库批量补齐资源元数据。
+                    "asset_ids": asset_ids,
                     "split_strategy": strategy,
                     "tokenizer": self._encoding.name,
                     "parent_id": parent_id,
@@ -168,6 +173,11 @@ class StructureAwareChunker:
             layout_engine = block.metadata.get("layout_engine")
             if isinstance(layout_engine, str) and layout_engine:
                 current.layout_engines.add(layout_engine)
+            raw_asset_ids = block.metadata.get("asset_ids")
+            if isinstance(raw_asset_ids, list):
+                current.asset_ids.update(
+                    value for value in raw_asset_ids if isinstance(value, str) and value
+                )
             if locator.bbox is not None:
                 bounding_boxes.append(locator.bbox)
 
@@ -229,8 +239,7 @@ class StructureAwareChunker:
             (
                 index
                 for index in range(1, len(lines))
-                if lines[index - 1].startswith("|")
-                and self._is_table_separator(lines[index])
+                if lines[index - 1].startswith("|") and self._is_table_separator(lines[index])
             ),
             None,
         )

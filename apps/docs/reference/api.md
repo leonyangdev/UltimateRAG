@@ -86,6 +86,11 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
 
 读取单份文档的元数据与状态。
 
+### `POST /api/documents/{document_id}/reindex` → 202
+
+复用 MinIO 原文件重新提交 Parser、Asset、Chunk 和向量索引。仅 READY/FAILED 可提交；处理中重复
+提交返回 409。适用于 Parser 升级后给存量 PDF 回填图片资源，无需用户重新上传。
+
 ### `DELETE /api/documents/{document_id}` → 204
 
 删除文档原文件、Chunk 和派生向量。文档正在处理时 → 409。
@@ -94,6 +99,12 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
 
 按 PostgreSQL 中保存的页码/BBox，从 MinIO 原 PDF 本地渲染命中区域。接口不接受自定义裁剪参数；
 非 PDF、非 READY、无页码或不存在的 Chunk 返回 404。响应支持 `ETag`、`If-None-Match` 与私有缓存。
+
+### `GET /api/assets/{asset_id}/content` → 200
+
+返回摄取期已从 READY 文档抽取的图片。Asset ID 必须存在于 PostgreSQL；服务端据此读取系统
+Object Key，接口不接受任意 MinIO Key。响应 MIME 来自持久化事实，支持强 ETag、304、私有缓存
+和 `nosniff`。
 
 ## 4. 检索与问答
 
@@ -136,7 +147,19 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
     "matched_content": "检索增强生成（RAG）...",
     "context_chunk_ids": ["chunk-before", "chunk-abc"],
     "content_types": ["TABLE"],
-    "preview_url": "/api/chunks/chunk-abc/preview"
+    "preview_url": "/api/chunks/chunk-abc/preview",
+    "assets": [
+      {
+        "id": "asset-123",
+        "kind": "IMAGE",
+        "media_type": "image/jpeg",
+        "filename": "figure-page-3-1.jpg",
+        "title": "Transformer 架构图",
+        "description": "图中左侧为 Encoder，右侧为 Decoder……",
+        "locator": { "heading_path": [], "page": 3, "bbox": [18.0, 80.0, 594.0, 554.0], "sheet": null, "cell_range": null, "slide": null },
+        "content_url": "/api/assets/asset-123/content"
+      }
+    ]
   }
 ]
 ```
@@ -181,7 +204,7 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
 
 // 响应
 {
-  "answer": "根据当前知识库，RAG 是检索增强生成... [来源 1]",
+  "answer": "图示如下：\n\n![Transformer 架构图](asset://asset-123)\n\n[来源 1](citation://1)",
   "citations": [
     {
       "document_id": "doc-123",
@@ -239,7 +262,7 @@ x-vercel-ai-ui-message-stream: v1     # AI SDK 识别标记
 |---|---|---|
 | `POST` | `/api/knowledge-bases/{id}/chat-sessions` | 创建空白新会话 |
 | `GET` | `/api/knowledge-bases/{id}/chat-sessions` | 按最近活动列出历史会话 |
-| `GET` | `/api/chat-sessions/{session_id}` | 返回会话与完整消息 |
+| `GET` | `/api/chat-sessions/{session_id}` | 返回会话、完整消息和助手消息的 Retrieval Evidence |
 
 新版 `/api/chat` 与 `/api/chat/stream` 可传 `session_id`。后端会验证会话属于请求中的知识库；
 不传时保留旧版无状态行为。全文总结的 `retrieval_trace` 还会返回：
@@ -250,6 +273,9 @@ x-vercel-ai-ui-message-stream: v1     # AI SDK 识别标记
   "strategy": "structural_coverage"
 }
 ```
+
+正常完成的助手消息会在 `retrieval_evidence` 中保存当时的 `citations`、`retrieval_results` 和
+`retrieval_trace`。这是展示历史来源的快照，不会在读取会话时重新调用 Milvus 或 LLM。
 
 ## 6. HTTP 状态码与业务异常映射
 
@@ -275,6 +301,7 @@ x-vercel-ai-ui-message-stream: v1     # AI SDK 识别标记
 | `context_chunk_ids` | Small2Big 实际进入上下文的 Child ID；Citation 仍锚定命中 `chunk_id` |
 | `content_types` | 命中 Child 的结构类型，如 `TEXT`、`TABLE`、`IMAGE` |
 | `preview_url` | 有 PDF 页码时返回受控局部预览路径，否则为 `null` |
+| `assets` | 命中 Chunk 关联的可展示资源元数据；只公开受控 `content_url`，不含 Object Key |
 
 ## 下一步
 

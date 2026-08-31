@@ -97,18 +97,18 @@ class VectorStore(Protocol):
 
 
 class ObjectStorage(Protocol):
-    """原始文件对象存储边界。"""
+    """原始文件与抽取二进制 Asset 的对象存储边界。"""
 
     async def ensure_bucket(self) -> None:
         """幂等保证文档 Bucket 存在。"""
         ...
 
     async def put(self, object_key: str, content: bytes, content_type: str) -> None:
-        """使用系统生成的对象键保存原始文件。"""
+        """使用系统生成的对象键保存原始文件或 Asset。"""
         ...
 
     async def get(self, object_key: str) -> bytes:
-        """读取完整原始文件，供同步解析或索引重建使用。"""
+        """读取完整对象，供解析、索引重建或受控 Asset API 使用。"""
         ...
 
     async def delete(self, object_key: str) -> None:

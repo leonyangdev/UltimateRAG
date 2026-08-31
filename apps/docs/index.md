@@ -29,9 +29,9 @@ features:
   - title: 🔎 V3 高级检索
     details: 理解 Dense、BM25、RRF、Query Rewrite、Reranker、Metadata Filter 与 Parent-Child 的工程取舍。
     link: /guide/v3-capabilities
-  - title: 🖼️ PDF 视觉证据
-    details: 从 Docling 图片/表格识别、BBox 持久化，到 PDFium 局部渲染和对话框证据模块的完整链路。
-    link: /guide/pdf-visual-evidence
+  - title: 🖼️ 多模态答案与来源
+    details: 沿完整 RAG 链路理解图片 Asset、Markdown 表格、可点击 Citation、来源侧栏与历史证据恢复。
+    link: /workflows/query
   - title: 💻 代码导读
     details: 挑出最有代表性的核心代码，逐段解释设计意图、关键约束与失败行为。
     link: /workflows/code-tour

@@ -14,6 +14,7 @@ from tiktoken import Encoding
 
 from ultimate_rag.application.services import RAGService
 from ultimate_rag.domain.models import (
+    ChatEvidence,
     ChatMessage,
     ChatRole,
     ChatSession,
@@ -193,7 +194,16 @@ class ChatService:
                 options,
                 conversation_context=context,
             )
-            await self._repository.complete_chat_turn(turn.assistant_message.id, result[0])
+            evidence = ChatEvidence(
+                citations=tuple(result[1]),
+                results=tuple(result[2]),
+                trace=result[3],
+            )
+            await self._repository.complete_chat_turn(
+                turn.assistant_message.id,
+                result[0],
+                evidence,
+            )
             return result
         except BaseException:
             await asyncio.shield(
@@ -235,7 +245,15 @@ class ChatService:
 
         return PreparedChatStream(
             message_id=turn.assistant_message.id,
-            stream=self._persisted_stream(turn.assistant_message.id, source),
+            stream=self._persisted_stream(
+                turn.assistant_message.id,
+                source,
+                ChatEvidence(
+                    citations=tuple(citations),
+                    results=tuple(results),
+                    trace=trace,
+                ),
+            ),
             citations=tuple(citations),
             results=tuple(results),
             trace=trace,
@@ -245,15 +263,20 @@ class ChatService:
         self,
         assistant_message_id: str,
         source: AsyncIterator[str],
+        evidence: ChatEvidence,
     ) -> AsyncIterator[str]:
-        """累积已发送增量，正常结束才提交；断流或取消都留下 FAILED 状态。"""
+        """累积增量并原子提交正文与证据；断流或取消留下 FAILED 状态。"""
 
         parts: list[str] = []
         try:
             async for delta in source:
                 parts.append(delta)
                 yield delta
-            await self._repository.complete_chat_turn(assistant_message_id, "".join(parts))
+            await self._repository.complete_chat_turn(
+                assistant_message_id,
+                "".join(parts),
+                evidence,
+            )
         except BaseException:
             await asyncio.shield(
                 self._repository.fail_chat_turn(assistant_message_id, "生成过程中断，请重新提问")

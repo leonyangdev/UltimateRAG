@@ -91,7 +91,7 @@ parsed_document = await parser.parse(source)
 
 ## 6. 状态一致性：未完成的文档绝不可用
 
-文档只有 **Parse → Chunk → Embed → Index 全部成功**后，才进入 `READY`：
+文档只有 **Parse → Chunk/Asset → Embed → Index 全部成功**后，才进入 `READY`：
 
 ```text
 PENDING → PARSING → CHUNKING → EMBEDDING → INDEXING → READY

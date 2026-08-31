@@ -40,15 +40,27 @@ interface EvidencePreviewProps {
 }
 
 /**
+ * 移除证据正文中的受控图片标记。
+ *
+ * 图片已由 EvidencePreview 使用后端白名单 URL 单独渲染；若再把 ``asset://`` 交给
+ * 通用 Markdown 渲染器，浏览器既无法直接加载自定义协议，也会在证据卡里产生重复图片。
+ */
+function withoutAssetMarkers(content: string): string {
+  return content.replace(/!\[[^\]]*\]\(asset:\/\/[^)]+\)\s*/g, "");
+}
+
+/**
  * 延迟加载 PDF 命中区域。预览失败只影响辅助证据，不隐藏已经召回的结构化文本。
  */
 function EvidencePreview({ result }: EvidencePreviewProps) {
   const [failed, setFailed] = useState(false);
-  if (!result.preview_url || failed) return null;
+  const asset = result.assets[0];
+  const previewUrl = asset?.content_url ?? result.preview_url;
+  if (!previewUrl || failed) return null;
 
   const isImage = result.content_types.includes("IMAGE");
   const isTable = result.content_types.includes("TABLE");
-  const label = isImage ? "PDF 图片原文" : isTable ? "PDF 表格原文" : "PDF 原文区域";
+  const label = asset?.title ?? (isImage ? "PDF 图片原文" : isTable ? "PDF 表格原文" : "PDF 原文区域");
 
   return (
     <figure className="overflow-hidden rounded-lg border border-border/80 bg-background">
@@ -57,14 +69,14 @@ function EvidencePreview({ result }: EvidencePreviewProps) {
         {label}
       </div>
       <a
-        href={`${API_URL}${result.preview_url}`}
+        href={`${API_URL}${previewUrl}`}
         target="_blank"
         rel="noreferrer"
         className="block bg-white"
         title="在新窗口查看原文证据"
       >
         <img
-          src={`${API_URL}${result.preview_url}`}
+          src={`${API_URL}${previewUrl}`}
           alt={`${result.filename} ${label}`}
           loading="lazy"
           onError={() => setFailed(true)}
@@ -72,7 +84,9 @@ function EvidencePreview({ result }: EvidencePreviewProps) {
         />
       </a>
       <figcaption className="border-t border-border/70 px-3 py-2 text-xs text-muted-foreground">
-        由原 PDF 的页码与版面坐标本地裁切；点击可查看大图。
+        {asset
+          ? "摄取期从原文抽取并持久化，可由答案中的 asset:// 引用复用。"
+          : "由原 PDF 的页码与版面坐标本地裁切；点击可查看大图。"}
       </figcaption>
     </figure>
   );
@@ -210,7 +224,7 @@ export function RetrievalEvidence({
                 <EvidencePreview result={result} />
                 <div className="prose-chat max-h-72 overflow-auto text-sm leading-7 text-muted-foreground [&_table]:text-sm">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {result.matched_content ?? result.content}
+                    {withoutAssetMarkers(result.matched_content ?? result.content)}
                   </ReactMarkdown>
                 </div>
               </CardContent>

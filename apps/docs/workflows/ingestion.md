@@ -23,7 +23,7 @@ IngestionWorker.run_once
    ▼
 DocumentProcessingService.process  ←──── 核心管线
    │  ⑥ PARSING  → Parse（Parser 解析原文件）
-   │  ⑦ CHUNKING → Chunk（切块）
+   │  ⑦ CHUNKING → Chunk（切块）+ Asset（图片持久化）
    │  ⑧ EMBEDDING→ Embed（向量化）
    │  ⑨ INDEXING → 写 PostgreSQL Chunk + Milvus 向量
    ▼
@@ -130,6 +130,10 @@ async def process(self, document_id) -> Document:
     if not chunks:
         raise InvalidDocumentError("文档没有生成任何 Chunk")    # 空文档不调用付费 API
 
+    # PDF 图片：稳定 Asset Key 写 MinIO，元数据事务写 document_assets。
+    # Asset 完成前不能进入 READY，答案不会引用尚不存在的图片。
+    await self._persist_assets(document, parsed.assets)
+
     # ── 阶段 3：Embed ─────────────────────────────────────────
     await self._repository.update_document_status(document.id, DocumentStatus.EMBEDDING)
     vectors = await self._embedder.embed_documents([c.content for c in chunks])
@@ -151,8 +155,8 @@ async def process(self, document_id) -> Document:
 
 | 阶段 | 输入 | 处理 | 输出 |
 |---|---|---|---|
-| Parse | MinIO 原始字节 | 按格式解析 | `ParsedDocument`（Block 序列） |
-| Chunk | Block 序列 | 结构感知切块 | `Chunk[]`（稳定 ID + 标题路径） |
+| Parse | MinIO 原始字节 | 按格式解析、PDF 图片 Vision | `ParsedDocument`（Block + ParsedAsset） |
+| Chunk/Asset | Block + Asset | 结构感知切块；图片写 MinIO/PG | `Chunk[] + DocumentAsset[]` |
 | Embed | Chunk 文本 | 百炼向量化（分批） | `EmbeddedChunk[]`（向量 + 文本） |
 | Index | Chunk + 向量 | 写 PostgreSQL + Milvus | 三者一致，可检索 |
 
@@ -212,10 +216,22 @@ GET /knowledge-bases/{kb_id}/documents
 
 - **Document + Job 同事务**：无丢任务窗口
 - **稳定 Chunk ID**：重试结果一致，无重复
+- **稳定 Asset ID/Object Key**：重试覆盖同一图片，不生成随机资源；旧资源在事实替换前清理
 - **replace_chunks 先删后插**（事务）：PostgreSQL 不留半套 Chunk
 - **delete_by_document + upsert**：Milvus 幂等重建
 - **READY 最后**：只有全部成功才可检索
 - **READY 过滤**：即使 Worker 崩溃留下半成品向量，检索层也会用 PostgreSQL 状态二次过滤
+
+## 10. Parser 升级后的存量文档
+
+已经 READY 的文档不会因为部署新 Parser 自动改变事实。知识库工作台的“重新解析”按钮调用：
+
+```text
+POST /api/documents/{document_id}/reindex → 202 PENDING
+```
+
+它复用原 Document ID 和 MinIO 原文件，在数据库行锁内重置唯一 IngestionJob。Worker 随后幂等
+替换 Asset、Chunk 和 Milvus 索引；处理中重复提交返回 409，避免两个 Worker 并发重建。
 
 ## 下一步
 

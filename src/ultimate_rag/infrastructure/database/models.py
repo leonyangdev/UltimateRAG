@@ -73,6 +73,9 @@ class DocumentModel(Base):
     chunks: Mapped[list["ChunkModel"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
+    assets: Mapped[list["DocumentAssetModel"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
     ingestion_job: Mapped["IngestionJobModel | None"] = relationship(
         back_populates="document", cascade="all, delete-orphan", uselist=False
     )
@@ -120,6 +123,28 @@ class ChunkModel(Base):
     document: Mapped[DocumentModel] = relationship(back_populates="chunks")
 
 
+class DocumentAssetModel(Base):
+    """从文档抽取并保存到 MinIO 的可展示资源元数据。"""
+
+    __tablename__ = "document_assets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    block_id: Mapped[str] = mapped_column(String(36), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    object_key: Mapped[str] = mapped_column(String(500), unique=True)
+    media_type: Mapped[str] = mapped_column(String(120))
+    filename: Mapped[str] = mapped_column(String(255))
+    title: Mapped[str] = mapped_column(String(500))
+    description: Mapped[str] = mapped_column(Text, default="")
+    sha256: Mapped[str] = mapped_column(String(64))
+    locator: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    document: Mapped[DocumentModel] = relationship(back_populates="assets")
+
+
 class ChatSessionModel(Base):
     """会话元数据与递归摘要；完整消息保存在独立事实表。"""
 
@@ -160,6 +185,9 @@ class ChatMessageModel(Base):
     role: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(20), default=ChatMessageStatus.COMPLETE.value)
     content: Mapped[str] = mapped_column(Text, default="")
+    # Citation、RetrievalResult 与 Trace 是回答时刻的不可变审计快照。使用 JSONB 避免把
+    # 高频读取但不参与关系查询的证据展开成多张会话子表。
+    retrieval_evidence: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(

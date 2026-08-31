@@ -1,6 +1,7 @@
+"use client";
+
 import { Bot, User } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { useState } from "react";
 
 import type {
   Citation,
@@ -9,6 +10,8 @@ import type {
   RetrievalTrace,
 } from "@/app/lib";
 import { RetrievalEvidence } from "@/components/retrieval-evidence";
+import { AnswerMarkdown } from "@/components/answer-markdown";
+import { SourceSidebar } from "@/components/source-sidebar";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
 interface RAGMessageProps {
@@ -25,6 +28,7 @@ interface RAGMessageProps {
  * 错配到新答案；未知 Part 有意忽略，便于未来增加 Tool Call 时独立扩展渲染器。
  */
 export function RAGMessage({ message }: RAGMessageProps) {
+  const [selectedSource, setSelectedSource] = useState<number | null>(null);
   const isUser = message.role === "user";
   const text = message.parts
     .filter((part) => part.type === "text")
@@ -61,7 +65,11 @@ export function RAGMessage({ message }: RAGMessageProps) {
         ) : (
           /* 助手消息：ChatGPT 风格，无背景，Markdown 渲染 */
           <div className="prose-chat text-sm leading-7 text-foreground">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+            <AnswerMarkdown
+              content={text}
+              results={results}
+              onCitationClick={setSelectedSource}
+            />
           </div>
         )}
         {!isUser && <RetrievalEvidence citations={citations} results={results} trace={trace} />}
@@ -73,6 +81,14 @@ export function RAGMessage({ message }: RAGMessageProps) {
             <User className="size-3.5" />
           </AvatarFallback>
         </Avatar>
+      )}
+      {!isUser && (
+        <SourceSidebar
+          sourceNumber={selectedSource}
+          citations={citations}
+          results={results}
+          onClose={() => setSelectedSource(null)}
+        />
       )}
     </article>
   );

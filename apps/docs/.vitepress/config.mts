@@ -38,8 +38,6 @@ export default defineConfig({
           items: [
             { text: "项目定位与版本演进", link: "/guide/project-overview" },
             { text: "V3 能力与限制", link: "/guide/v3-capabilities" },
-            { text: "全文总结与多轮会话", link: "/guide/summary-and-sessions" },
-            { text: "PDF 图片与表格证据", link: "/guide/pdf-visual-evidence" },
             { text: "V2 能力与限制", link: "/guide/v2-capabilities" },
           ],
         },

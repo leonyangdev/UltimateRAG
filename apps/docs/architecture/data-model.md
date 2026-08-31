@@ -11,6 +11,7 @@ KnowledgeBase（知识库）
     └── Document（文档）
          ├── 状态：DocumentStatus
          ├── 原文件：MinIO ObjectKey
+         ├── DocumentAsset[]（图片资源元数据；二进制在 MinIO）
          └── 后台任务：IngestionJob
               ├── Chunk[]（文本片段，存 PostgreSQL）
               │     └── 每个 Chunk 带 SourceLocator（来源定位）
@@ -91,9 +92,18 @@ Block → Chunk → PostgreSQL/Milvus → RetrievalResult → Citation → 前�
 
 Parser 的输出单元：`id`（稳定 UUID5）、`type`（BlockType）、`content`、`locator`、`metadata`。
 
-### ParsedDocument —— 统一解析结果
+### ParsedDocument / ParsedAsset —— 统一解析结果
 
-`document_id + blocks[] + metadata`。**这是所有 Parser 的统一出口**，下游不再感知原始格式。
+`ParsedDocument` 包含 `document_id + blocks[] + assets[] + metadata`。**这是所有 Parser 的统一
+出口**，下游不再感知原始格式。普通格式的 `assets` 为空；PDF 图片同时产生：
+
+- IMAGE Block：`asset://` Markdown + 题注 + Vision 描述，供 Chunk/Embedding/Retrieval；
+- ParsedAsset：JPEG 字节、稳定 ID、Block ID、题名、摘要和 Locator，供应用层持久化。
+
+### DocumentAsset —— 持久化资源事实
+
+记录 Asset 与 `document_id / block_id / object_key / media_type / sha256 / locator` 的关联。API
+只公开 `content_url`，不会把 MinIO Object Key 交给浏览器或 LLM。
 
 ### Chunk —— 可检索文本单元
 
@@ -117,8 +127,8 @@ Parser 的输出单元：`id`（稳定 UUID5）、`type`（BlockType）、`conte
 ### RetrievalResult —— 检索命中
 
 除基础来源字段外，V3 还保留 `dense_score / sparse_score / fusion_score / rerank_score`、
-`retrieval_sources`、`matched_content` 和 `context_chunk_ids`。`score` 表示当前最终排序实际使用的
-分数，不能跨模式或跨请求直接比较。
+`retrieval_sources`、`matched_content`、`context_chunk_ids`、`content_types` 和 `assets`。
+`score` 表示当前最终排序实际使用的分数，不能跨模式或跨请求直接比较。
 
 保留完整来源信息，**检索结果可以直接构造 Citation，无需再查库**（避免 N+1）。
 
@@ -137,14 +147,21 @@ Parser 的输出单元：`id`（稳定 UUID5）、`type`（BlockType）、`conte
 
 Worker 处理的任务：`id / document_id / status / attempts / max_attempts / available_at / locked_at / worker_id / error_message`。
 
+### ChatEvidence —— 历史回答的检索快照
+
+助手消息除正文外还保存 `Citation[] + RetrievalResult[] + RetrievalTrace`。它不是新的知识事实，
+而是“这次回答当时使用了什么证据”的审计快照，使刷新或恢复历史会话后，`[来源 N]` 侧栏与
+`asset://` 图片仍然可用。
+
 ## 4. 数据在哪些层如何变化
 
 ```text
 原始文件字节
    ↓ Parser
-ParsedDocument + Block[]        （Domain 模型）
+ParsedDocument + Block[] + ParsedAsset[]
    ↓ Chunker
 Chunk[]                         （Domain 模型）
+   ├─ Asset → MinIO + PostgreSQL document_assets
    ↓ Embedder
 EmbeddedChunk[]                 （Domain 模型）
    ↓ Milvus Dense + BM25 → RRF → Rerank → Small2Big
@@ -152,7 +169,7 @@ EmbeddedChunk[]                 （Domain 模型）
    ↓ ContextBuilder
 上下文文本                       （普通字符串）
    ↓ LLM
-答案 + Citation[]               （Domain 模型）
+答案 + Citation[] + ChatEvidence（Domain 模型）
 ```
 
 > 注意到没有？从 ParsedDocument 到 RetrievalResult，全程都是**不可变 dataclass**（`frozen=True`）。这保证了数据在跨层传递时的安全性，也让测试非常方便。

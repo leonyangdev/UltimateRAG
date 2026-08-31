@@ -11,8 +11,10 @@ from PIL import Image, ImageDraw
 from ultimate_rag.application import VisualEvidenceService
 from ultimate_rag.domain.exceptions import DocumentProcessingError, ResourceNotFoundError
 from ultimate_rag.domain.models import (
+    BlockType,
     Chunk,
     Document,
+    DocumentAsset,
     DocumentStatus,
     SourceLocator,
 )
@@ -101,6 +103,22 @@ class _Repository:
     async def get_document(self, document_id: str) -> Document:
         assert document_id == self.document.id
         return self.document
+
+    async def get_document_asset(self, asset_id: str) -> DocumentAsset:
+        assert asset_id == "asset-1"
+        return DocumentAsset(
+            id=asset_id,
+            document_id=self.document.id,
+            block_id="block-1",
+            kind=BlockType.IMAGE,
+            object_key="kb-1/doc-1/assets/asset-1.jpg",
+            media_type="image/jpeg",
+            filename="asset-1.jpg",
+            title="Transformer 架构图",
+            description="Encoder 与 Decoder",
+            sha256="asset-sha",
+            locator=SourceLocator(page=3),
+        )
 
 
 class _Storage:
@@ -199,3 +217,23 @@ async def test_visual_evidence_rejects_non_pdf_chunk() -> None:
 
     with pytest.raises(ResourceNotFoundError, match="没有可用"):
         await service.preview_chunk("chunk-1")
+
+
+@pytest.mark.asyncio
+async def test_visual_evidence_reads_registered_asset_object() -> None:
+    """Asset 内容必须使用数据库登记的 Key，并沿用摄取期 SHA-256 作为 ETag。"""
+
+    storage = _Storage()
+    service = VisualEvidenceService(
+        cast(Repository, _Repository(_document(), _chunk())),
+        cast(ObjectStorage, storage),
+        cast(PDFPreviewRenderer, _Renderer()),
+    )
+
+    content = await service.read_asset("asset-1")
+
+    assert content.content == b"pdf"
+    assert content.media_type == "image/jpeg"
+    assert content.filename == "asset-1.jpg"
+    assert content.etag == "asset-sha"
+    assert storage.requested_key == "kb-1/doc-1/assets/asset-1.jpg"

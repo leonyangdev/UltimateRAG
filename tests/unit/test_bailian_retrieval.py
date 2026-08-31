@@ -221,8 +221,7 @@ async def test_reranker_rejects_non_finite_score() -> None:
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
-            200,
-            json={"results": [{"index": 0, "relevance_score": float("nan")}]}
+            200, json={"results": [{"index": 0, "relevance_score": float("nan")}]}
         )
 
     reranker = BailianReranker(

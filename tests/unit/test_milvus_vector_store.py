@@ -133,6 +133,5 @@ def test_sparse_row_and_filter_preserve_rebuild_metadata() -> None:
     assert row["content"] == "Milvus BM25"
     assert row["heading_path"] == {"heading_path": ["检索"], "page": 2}
     assert expression == (
-        'knowledge_base_id == "kb-1\\\" or id != \\\"" '
-        'and document_id in ["doc-1\\\" or id != \\\""]'
+        'knowledge_base_id == "kb-1\\" or id != \\"" and document_id in ["doc-1\\" or id != \\""]'
     )

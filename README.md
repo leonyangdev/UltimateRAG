@@ -21,7 +21,9 @@
 11. 使用阿里云百炼模型进行知识库问答，并用 JSONL 指标工具做检索消融评估
 12. 全文总结自动改用跨章节覆盖，避免摘要、实验和结论被参考文献挤出 Top-K
 13. 每次进入知识库新建会话，也可恢复历史会话；长对话使用“递归摘要 + 最近原文”
-14. 删除文档或知识库，并同步清理三类存储和两个 Milvus 派生索引
+14. PDF 图片以 Asset 写入 MinIO，回答正文可直接显示图片；Markdown 表格保留源数据
+15. 点击 `[来源 N]` 在右侧侧栏核验 Chunk、图片、表格、页码与 BBox，历史会话仍保留证据
+16. 复用原文件异步重新解析存量文档，或删除文档/知识库并清理全部跨存储资源
 
 V3 明确不包含 ACL/认证/审计、DLQ 控制台、完整 RAGOps 和 Agent/GraphRAG；这些属于后续版本。
 
@@ -37,7 +39,7 @@ FastAPI Interface
 
 PostgreSQL Job
     ↓
-Background Worker → Parse → Chunk → Embed → Index
+Background Worker → Parse → Chunk/Asset → Embed → Index
     │
     ▼
 Domain Ports
@@ -59,8 +61,8 @@ Domain Ports
 关键原则：
 
 - Domain 不依赖 FastAPI、SQLAlchemy、Milvus、OpenAI SDK 或 LangChain
-- PostgreSQL 保存知识库、文档状态和 Chunk 元数据
-- MinIO 保存所有原始文件，且对象键由系统生成
+- PostgreSQL 保存知识库、文档状态、Chunk、Asset 元数据、会话和回答证据
+- MinIO 保存所有原始文件和抽取图片 Asset，且对象键由系统生成
 - Milvus 只保存可重建向量索引，不作为业务事实数据源
 - 文档仅在 Parse、Chunk、Embedding、Index 全部成功后进入 `READY`
 - Worker 使用 PostgreSQL 租约、心跳和有限重试，进程重启不会丢失上传任务
@@ -69,6 +71,7 @@ Domain Ports
 详细设计见 [V3 实现说明](docs/5.v3_implementation.md) 和
 [ADR-002：Hybrid Retrieval](docs/adr/ADR-002-v3-hybrid-retrieval.md)、
 [ADR-003：总结感知检索与会话记忆](docs/adr/ADR-003-summary-aware-retrieval-and-chat-memory.md)。
+[ADR-004：PDF 多模态资源与视觉证据](docs/adr/ADR-004-pdf-visual-evidence.md)。
 V2 文档智能见
 [V2 实现说明](docs/4.v2_implementation.md)。
 

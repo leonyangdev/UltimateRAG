@@ -157,6 +157,11 @@ class RetrievalService:
                 tuple(sorted(ready_document_ids)),
             )
             results = self._summary_selector.select(chunks)
+            try:
+                results = await self._attach_evidence_metadata(results)
+            except Exception:
+                # 全文总结仍以文本覆盖为核心；Asset 元数据不可用时保留可回答的结构证据。
+                logger.warning("Summary evidence metadata enrichment failed", exc_info=True)
             return RetrievalRun(
                 results=tuple(results),
                 trace=RetrievalTrace(
@@ -295,14 +300,14 @@ class RetrievalService:
                 )
                 fallback_reasons.append("parent_expansion_failed")
 
-        # Milvus 只保存检索必需字段；Block 类型属于 PostgreSQL Chunk 事实。最终结果在此批量
-        # 补齐，前端才能把 TABLE/IMAGE 命中显示为专用证据模块而不迁移现有向量集合。
-        if candidates and any(not result.content_types for result in candidates):
+        # Milvus 只保存检索必需字段；Block 类型与图片 Asset 属于 PostgreSQL/MinIO 事实。
+        # 最终结果在此批量补齐，避免迁移现有向量集合或把内部 Object Key 放入派生索引。
+        if candidates:
             try:
-                candidates = await self._attach_content_types(candidates)
+                candidates = await self._attach_evidence_metadata(candidates)
             except Exception:
                 # 类型标签与预览属于解释层增强，读取失败不能让已完成的核心问答不可用。
-                logger.warning("Chunk content type enrichment failed", exc_info=True)
+                logger.warning("Chunk evidence metadata enrichment failed", exc_info=True)
 
         trace = RetrievalTrace(
             original_query=normalized_query,
@@ -443,26 +448,62 @@ class RetrievalService:
             )
         return expanded, has_expansion
 
-    async def _attach_content_types(
+    async def _attach_evidence_metadata(
         self,
         results: list[RetrievalResult],
     ) -> list[RetrievalResult]:
-        """通过一批事实查询补齐命中块类型；不存在的旧 Chunk 保持兼容空值。"""
+        """批量补齐命中块类型与 Asset，避免 PostgreSQL N+1 查询。
+
+        Chunk metadata 只保存稳定 Asset ID；图片 Object Key 等事实从 ``document_assets``
+        读取。不存在的旧 Chunk/Asset 保持兼容空值，普通文本回答不受影响。
+        """
 
         contexts = await self._repository.get_chunks_with_neighbors(
             [result.chunk_id for result in results],
             window=0,
         )
-        enriched: list[RetrievalResult] = []
+        matched_chunks: dict[str, Chunk] = {}
+        all_asset_ids: list[str] = []
         for result in results:
             chunks = contexts.get(result.chunk_id, [])
             matched = next((chunk for chunk in chunks if chunk.id == result.chunk_id), None)
+            if matched is None:
+                continue
+            matched_chunks[result.chunk_id] = matched
+            all_asset_ids.extend(self._asset_ids(matched))
+        assets_by_id = await self._repository.get_document_assets(all_asset_ids)
+
+        enriched: list[RetrievalResult] = []
+        for result in results:
+            matched = matched_chunks.get(result.chunk_id)
+            if matched is None:
+                enriched.append(result)
+                continue
+            assets = tuple(
+                asset
+                for asset_id in self._asset_ids(matched)
+                if (asset := assets_by_id.get(asset_id)) is not None
+                and asset.document_id == result.document_id
+            )
             enriched.append(
-                replace(result, content_types=self._content_types(matched))
-                if matched is not None
-                else result
+                replace(
+                    result,
+                    content_types=self._content_types(matched),
+                    assets=assets,
+                )
             )
         return enriched
+
+    @staticmethod
+    def _asset_ids(chunk: Chunk) -> tuple[str, ...]:
+        """从 JSONB 恢复去重且保持 Parser 顺序的 Asset ID。"""
+
+        raw_values = chunk.metadata.get("asset_ids")
+        if not isinstance(raw_values, list):
+            return ()
+        return tuple(
+            dict.fromkeys(value for value in raw_values if isinstance(value, str) and value.strip())
+        )
 
     @staticmethod
     def _content_types(chunk: Chunk) -> tuple[BlockType, ...]:

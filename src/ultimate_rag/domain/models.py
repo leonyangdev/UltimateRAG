@@ -187,11 +187,53 @@ class Block:
 
 @dataclass(frozen=True, slots=True)
 class ParsedDocument:
-    """统一解析结果，使后续切块逻辑无需感知原始文件格式。"""
+    """统一解析结果，使后续切块逻辑无需感知原始文件格式。
+
+    ``assets`` 保存 Parser 从原文抽取出的可展示二进制资源。Parser 只生成稳定 ID 和内存字节，
+    不知道 MinIO Object Key；对象存储持久化仍由应用层摄取管线负责。
+    """
 
     document_id: str
     blocks: tuple[Block, ...]
     metadata: dict[str, JsonValue] = field(default_factory=dict)
+    # assets 放在 metadata 之后，保留旧调用方把第三个位置参数作为 metadata 的兼容语义。
+    assets: tuple["ParsedAsset", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedAsset:
+    """Parser 抽取出的待持久化视觉资源。
+
+    图片语义已经写入关联 Block，``content`` 只承载经过格式与大小限制的二进制，不进入
+    Embedding。稳定 ``id`` 同时出现在 Block metadata 和 Markdown ``asset://`` 标记中。
+    """
+
+    id: str
+    block_id: str
+    kind: BlockType
+    media_type: str
+    filename: str
+    title: str
+    description: str
+    content: bytes
+    locator: SourceLocator | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentAsset:
+    """已由 MinIO 与 PostgreSQL 共同持久化的文档资源事实。"""
+
+    id: str
+    document_id: str
+    block_id: str
+    kind: BlockType
+    object_key: str
+    media_type: str
+    filename: str
+    title: str
+    description: str
+    sha256: str
+    locator: SourceLocator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +314,9 @@ class RetrievalResult:
     # 类型来自 PostgreSQL Chunk 事实而不是 Milvus 派生索引。前端据此区分正文、表格和
     # 图片语义块；新增默认值保持旧索引与第三方 VectorStore 实现向后兼容。
     content_types: tuple[BlockType, ...] = ()
+    # Asset 元数据来自 PostgreSQL，二进制仍留在 MinIO。模型只会看到稳定 asset:// ID，
+    # API Schema 再把它映射为受控内容端点，绝不暴露内部 Object Key。
+    assets: tuple[DocumentAsset, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +325,16 @@ class DocumentPreview:
 
     content: bytes
     media_type: str
+    etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentAssetContent:
+    """从对象存储读取、可安全映射为 HTTP 响应的资源内容。"""
+
+    content: bytes
+    media_type: str
+    filename: str
     etag: str
 
 
@@ -312,6 +367,15 @@ class RetrievalTrace:
 class RetrievalRun:
     """高级检索结果与其解释信息的组合，供调试 API 和 RAG 生成共同复用。"""
 
+    results: tuple[RetrievalResult, ...]
+    trace: RetrievalTrace
+
+
+@dataclass(frozen=True, slots=True)
+class ChatEvidence:
+    """随助手消息持久化的检索快照，使历史会话仍可打开来源与图片。"""
+
+    citations: tuple["Citation", ...]
     results: tuple[RetrievalResult, ...]
     trace: RetrievalTrace
 
@@ -401,6 +465,7 @@ class ChatMessage:
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+    evidence: ChatEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)

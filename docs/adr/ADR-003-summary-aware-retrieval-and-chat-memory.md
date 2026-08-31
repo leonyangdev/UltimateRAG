@@ -69,4 +69,5 @@ Trace 新增 `intent` 和 `strategy`，避免把结构覆盖的顺序分数误�
 - 历史会话跨刷新、跨进程存在，后续问题可用会话消解指代。
 - 新增 Alembic `0003_chat_sessions`，部署前必须执行迁移。
 - 长会话偶尔产生一次额外百炼摘要调用；通过阈值、最大输出和失败降级控制成本。
-- 历史消息暂不保存每轮完整 Retrieval Evidence；会话正文可恢复，证据仍在当前流中展示。
+- ADR-004 后续通过 `chat_messages.retrieval_evidence` 保存每轮完整证据快照；历史会话可以恢复
+  Citation、RetrievalResult、Trace 和图片 Asset，不需要重新检索。

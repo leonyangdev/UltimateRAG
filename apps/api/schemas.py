@@ -9,10 +9,12 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ultimate_rag.domain.models import (
+    ChatEvidence,
     ChatMessage,
     ChatSession,
     Citation,
     Document,
+    DocumentAsset,
     KnowledgeBase,
     RetrievalIntent,
     RetrievalMode,
@@ -177,6 +179,34 @@ class RetrievalRequest(BaseModel):
         )
 
 
+class DocumentAssetResponse(BaseModel):
+    """可在答案正文安全渲染的文档资源，不暴露 MinIO Object Key。"""
+
+    id: str
+    kind: str
+    media_type: str
+    filename: str
+    title: str
+    description: str
+    locator: SourceLocatorResponse | None
+    content_url: str
+
+    @classmethod
+    def from_domain(cls, value: DocumentAsset) -> "DocumentAssetResponse":
+        """把内部资源事实映射为受控内容端点。"""
+
+        return cls(
+            id=value.id,
+            kind=value.kind.value,
+            media_type=value.media_type,
+            filename=value.filename,
+            title=value.title,
+            description=value.description,
+            locator=SourceLocatorResponse.from_domain(value.locator),
+            content_url=f"/api/assets/{value.id}/content",
+        )
+
+
 class RetrievalResultResponse(BaseModel):
     """包含来源、最终分数和各检索阶段解释字段的命中。"""
 
@@ -197,6 +227,7 @@ class RetrievalResultResponse(BaseModel):
     content_types: list[str]
     # 相对路径允许前端沿用当前 API Origin；只有带 PDF 页码的命中才提供预览入口。
     preview_url: str | None
+    assets: list[DocumentAssetResponse]
 
     @classmethod
     def from_domain(cls, value: RetrievalResult) -> "RetrievalResultResponse":
@@ -222,6 +253,7 @@ class RetrievalResultResponse(BaseModel):
                 if value.locator is not None and value.locator.page is not None
                 else None
             ),
+            assets=[DocumentAssetResponse.from_domain(item) for item in value.assets],
         )
 
 
@@ -295,35 +327,6 @@ class ChatSessionResponse(BaseModel):
         )
 
 
-class ChatMessageResponse(BaseModel):
-    """恢复历史会话所需的稳定消息字段。"""
-
-    id: str
-    role: str
-    status: str
-    content: str
-    error_message: str | None
-    created_at: datetime
-
-    @classmethod
-    def from_domain(cls, value: ChatMessage) -> "ChatMessageResponse":
-        return cls(
-            id=value.id,
-            role=value.role.value,
-            status=value.status.value,
-            content=value.content,
-            error_message=value.error_message,
-            created_at=value.created_at,
-        )
-
-
-class ChatSessionDetailResponse(BaseModel):
-    """会话元数据及按序消息，用于刷新或选择历史会话。"""
-
-    session: ChatSessionResponse
-    messages: list[ChatMessageResponse]
-
-
 class CitationResponse(BaseModel):
     """最终答案引用的文档、Chunk 与章节定位。"""
 
@@ -354,6 +357,59 @@ class ChatResponse(BaseModel):
     citations: list[CitationResponse]
     retrieval_results: list[RetrievalResultResponse]
     retrieval_trace: RetrievalTraceResponse
+
+
+class ChatEvidenceResponse(BaseModel):
+    """助手消息持久化的检索快照，字段与实时 data-retrieval Part 一致。"""
+
+    citations: list[CitationResponse]
+    retrieval_results: list[RetrievalResultResponse]
+    retrieval_trace: RetrievalTraceResponse
+
+    @classmethod
+    def from_domain(cls, value: ChatEvidence) -> "ChatEvidenceResponse":
+        """显式映射历史证据，保持实时与恢复后的前端协议一致。"""
+
+        return cls(
+            citations=[CitationResponse.from_domain(item) for item in value.citations],
+            retrieval_results=[RetrievalResultResponse.from_domain(item) for item in value.results],
+            retrieval_trace=RetrievalTraceResponse.from_domain(value.trace),
+        )
+
+
+class ChatMessageResponse(BaseModel):
+    """恢复历史会话所需的正文、状态和可选检索证据。"""
+
+    id: str
+    role: str
+    status: str
+    content: str
+    error_message: str | None
+    created_at: datetime
+    retrieval_evidence: ChatEvidenceResponse | None
+
+    @classmethod
+    def from_domain(cls, value: ChatMessage) -> "ChatMessageResponse":
+        """把消息事实映射为可直接恢复 AI SDK Message Part 的响应。"""
+
+        return cls(
+            id=value.id,
+            role=value.role.value,
+            status=value.status.value,
+            content=value.content,
+            error_message=value.error_message,
+            created_at=value.created_at,
+            retrieval_evidence=(
+                ChatEvidenceResponse.from_domain(value.evidence) if value.evidence else None
+            ),
+        )
+
+
+class ChatSessionDetailResponse(BaseModel):
+    """会话元数据及按序消息，用于刷新或选择历史会话。"""
+
+    session: ChatSessionResponse
+    messages: list[ChatMessageResponse]
 
 
 class ErrorResponse(BaseModel):

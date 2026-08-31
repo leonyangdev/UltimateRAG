@@ -11,26 +11,39 @@ from uuid import uuid4
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ultimate_rag.domain.exceptions import ChatSessionBusyError, ResourceNotFoundError
+from ultimate_rag.domain.exceptions import (
+    ChatSessionBusyError,
+    DocumentBusyError,
+    ResourceNotFoundError,
+)
 from ultimate_rag.domain.models import (
+    BlockType,
+    ChatEvidence,
     ChatMessage,
     ChatMessageStatus,
     ChatRole,
     ChatSession,
     ChatTurn,
     Chunk,
+    Citation,
     Document,
+    DocumentAsset,
     DocumentStatus,
     IngestionJob,
     IngestionJobStatus,
     JsonValue,
     KnowledgeBase,
+    RetrievalIntent,
+    RetrievalMode,
+    RetrievalResult,
+    RetrievalTrace,
     SourceLocator,
 )
 from ultimate_rag.infrastructure.database.models import (
     ChatMessageModel,
     ChatSessionModel,
     ChunkModel,
+    DocumentAssetModel,
     DocumentModel,
     IngestionJobModel,
     KnowledgeBaseModel,
@@ -198,8 +211,17 @@ class Repository:
             history=tuple(self._chat_message(value) for value in history_models),
         )
 
-    async def complete_chat_turn(self, assistant_message_id: str, content: str) -> None:
-        """仅允许把 PENDING 助手占位提交为非空完整答案。"""
+    async def complete_chat_turn(
+        self,
+        assistant_message_id: str,
+        content: str,
+        evidence: ChatEvidence | None = None,
+    ) -> None:
+        """仅允许把 PENDING 助手占位提交为非空答案与检索快照。
+
+        ``evidence`` 与正文在同一事务提交。浏览器刷新后不能只恢复一句含 ``asset://`` 的
+        Markdown、却丢失 Asset 与 Citation 映射，否则历史答案会出现无法渲染的资源占位。
+        """
 
         normalized = content.strip()
         if not normalized:
@@ -213,6 +235,10 @@ class Repository:
             ):
                 raise RuntimeError("助手消息不存在或已经结束")
             message.content = normalized
+            message.retrieval_evidence = cast(
+                dict[str, object] | None,
+                self._chat_evidence_metadata(evidence),
+            )
             message.status = ChatMessageStatus.COMPLETE.value
             message.error_message = None
             parent = await session.get(ChatSessionModel, message.session_id)
@@ -347,6 +373,50 @@ class Repository:
             if await session.get(KnowledgeBaseModel, knowledge_base_id) is None:
                 raise ResourceNotFoundError("知识库不存在")
             session.add_all([document, job])
+        return self._document(document)
+
+    async def requeue_document(self, document_id: str, *, max_attempts: int) -> Document:
+        """把终态文档原子重置为 PENDING，并复用唯一摄取任务重建派生数据。
+
+        原始文件和文档 ID 都保持不变，因此重新解析可以为存量 PDF 生成新的 Asset/Chunk，
+        同时稳定覆盖该文档的 PostgreSQL 与 Milvus 派生索引。处理中状态会被明确拒绝，避免
+        两个 Worker 同时替换同一文档事实。
+        """
+
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        now = datetime.now(UTC)
+        async with self._session_factory() as session, session.begin():
+            document = await session.scalar(
+                select(DocumentModel).where(DocumentModel.id == document_id).with_for_update()
+            )
+            if document is None:
+                raise ResourceNotFoundError("文档不存在")
+            if document.status not in {
+                DocumentStatus.READY.value,
+                DocumentStatus.FAILED.value,
+            }:
+                raise DocumentBusyError("文档正在后台处理，不能重复提交重建")
+
+            job = await session.scalar(
+                select(IngestionJobModel)
+                .where(IngestionJobModel.document_id == document_id)
+                .with_for_update()
+            )
+            if job is None:
+                job = IngestionJobModel(id=str(uuid4()), document_id=document_id)
+                session.add(job)
+            job.status = IngestionJobStatus.PENDING.value
+            job.attempts = 0
+            job.max_attempts = max_attempts
+            job.available_at = now
+            job.locked_at = None
+            job.worker_id = None
+            job.error_message = None
+
+            document.status = DocumentStatus.PENDING.value
+            document.error_message = None
+            document.updated_at = now
         return self._document(document)
 
     async def claim_ingestion_job(
@@ -566,6 +636,44 @@ class Repository:
             model, knowledge_base_id, filename = row
             return self._chunk(model, knowledge_base_id, filename)
 
+    async def get_document_asset(self, asset_id: str) -> DocumentAsset:
+        """按稳定 ID 读取单个文档资源，不返回二进制内容。"""
+
+        async with self._session_factory() as session:
+            model = await session.get(DocumentAssetModel, asset_id)
+            if model is None:
+                raise ResourceNotFoundError("文档资源不存在")
+            return self._document_asset(model)
+
+    async def get_document_assets(
+        self,
+        asset_ids: Sequence[str],
+    ) -> dict[str, DocumentAsset]:
+        """一次性读取多个资源元数据，供 Retrieval 避免逐 Chunk 查询。"""
+
+        unique_ids = tuple(dict.fromkeys(asset_ids))
+        if not unique_ids:
+            return {}
+        async with self._session_factory() as session:
+            values = await session.scalars(
+                select(DocumentAssetModel).where(DocumentAssetModel.id.in_(unique_ids))
+            )
+            return {model.id: self._document_asset(model) for model in values}
+
+    async def list_document_assets(self, document_ids: Sequence[str]) -> list[DocumentAsset]:
+        """按文档集合批量返回资源事实，用于摄取补偿和删除生命周期。"""
+
+        unique_ids = tuple(dict.fromkeys(document_ids))
+        if not unique_ids:
+            return []
+        async with self._session_factory() as session:
+            values = await session.scalars(
+                select(DocumentAssetModel)
+                .where(DocumentAssetModel.document_id.in_(unique_ids))
+                .order_by(DocumentAssetModel.document_id, DocumentAssetModel.created_at)
+            )
+            return [self._document_asset(model) for model in values]
+
     async def list_ready_document_ids(
         self,
         knowledge_base_id: str,
@@ -769,6 +877,42 @@ class Repository:
                 ]
             )
 
+    async def replace_document_assets(
+        self,
+        document_id: str,
+        assets: Sequence[DocumentAsset],
+    ) -> None:
+        """在单事务中替换一份文档的资源元数据，保持 Worker 重试幂等。
+
+        MinIO 对象会在应用层先以稳定 Key 写入。本事务只在所有新行可插入时整体提交；失败
+        不会让 READY 文档看到半套资源事实，文档状态也仍由处理管线控制。
+        """
+
+        if any(asset.document_id != document_id for asset in assets):
+            raise ValueError("all assets must belong to the replaced document")
+        async with self._session_factory() as session, session.begin():
+            await session.execute(
+                delete(DocumentAssetModel).where(DocumentAssetModel.document_id == document_id)
+            )
+            session.add_all(
+                [
+                    DocumentAssetModel(
+                        id=asset.id,
+                        document_id=asset.document_id,
+                        block_id=asset.block_id,
+                        kind=asset.kind.value,
+                        object_key=asset.object_key,
+                        media_type=asset.media_type,
+                        filename=asset.filename,
+                        title=asset.title,
+                        description=asset.description,
+                        sha256=asset.sha256,
+                        locator=asset.locator.to_metadata() if asset.locator else {},
+                    )
+                    for asset in assets
+                ]
+            )
+
     async def delete_document(self, document_id: str) -> Document:
         """删除文档及其级联 Chunk，并返回删除前领域快照。"""
         async with self._session_factory() as session, session.begin():
@@ -836,6 +980,25 @@ class Repository:
         )
 
     @staticmethod
+    def _document_asset(model: DocumentAssetModel) -> DocumentAsset:
+        """把资源 ORM 元数据恢复为领域事实；二进制仍由 MinIO 按 Key 读取。"""
+
+        locator = SourceLocator.from_metadata(model.locator) if model.locator else None
+        return DocumentAsset(
+            id=model.id,
+            document_id=model.document_id,
+            block_id=model.block_id,
+            kind=BlockType(model.kind),
+            object_key=model.object_key,
+            media_type=model.media_type,
+            filename=model.filename,
+            title=model.title,
+            description=model.description,
+            sha256=model.sha256,
+            locator=locator,
+        )
+
+    @staticmethod
     def _ingestion_job(model: IngestionJobModel) -> IngestionJob:
         """把 ORM 任务映射为 Worker 可安全持有的不可变快照。"""
 
@@ -869,7 +1032,7 @@ class Repository:
 
     @staticmethod
     def _chat_message(model: ChatMessageModel) -> ChatMessage:
-        """把消息角色与状态字符串恢复为受控枚举。"""
+        """把消息角色、状态与可选检索快照恢复为受控领域对象。"""
 
         return ChatMessage(
             id=model.id,
@@ -881,7 +1044,216 @@ class Repository:
             error_message=model.error_message,
             created_at=Repository._datetime(model.created_at),
             updated_at=Repository._datetime(model.updated_at),
+            evidence=Repository._chat_evidence(model.retrieval_evidence),
         )
+
+    @staticmethod
+    def _chat_evidence_metadata(evidence: ChatEvidence | None) -> dict[str, JsonValue] | None:
+        """把问答证据转换为不包含二进制的 JSONB 审计快照。"""
+
+        if evidence is None:
+            return None
+
+        def locator(value: SourceLocator | None) -> JsonValue:
+            return value.to_metadata() if value else None
+
+        def asset(value: DocumentAsset) -> dict[str, JsonValue]:
+            return {
+                "id": value.id,
+                "document_id": value.document_id,
+                "block_id": value.block_id,
+                "kind": value.kind.value,
+                "object_key": value.object_key,
+                "media_type": value.media_type,
+                "filename": value.filename,
+                "title": value.title,
+                "description": value.description,
+                "sha256": value.sha256,
+                "locator": locator(value.locator),
+            }
+
+        return {
+            "citations": [
+                {
+                    "document_id": value.document_id,
+                    "filename": value.filename,
+                    "chunk_id": value.chunk_id,
+                    "heading_path": list(value.heading_path),
+                    "locator": locator(value.locator),
+                    "context_chunk_ids": list(value.context_chunk_ids),
+                }
+                for value in evidence.citations
+            ],
+            "results": [
+                {
+                    "chunk_id": value.chunk_id,
+                    "knowledge_base_id": value.knowledge_base_id,
+                    "document_id": value.document_id,
+                    "filename": value.filename,
+                    "content": value.content,
+                    "heading_path": list(value.heading_path),
+                    "score": value.score,
+                    "locator": locator(value.locator),
+                    "dense_score": value.dense_score,
+                    "sparse_score": value.sparse_score,
+                    "fusion_score": value.fusion_score,
+                    "rerank_score": value.rerank_score,
+                    "retrieval_sources": list(value.retrieval_sources),
+                    "matched_content": value.matched_content,
+                    "context_chunk_ids": list(value.context_chunk_ids),
+                    "content_types": [item.value for item in value.content_types],
+                    "assets": [asset(item) for item in value.assets],
+                }
+                for value in evidence.results
+            ],
+            "trace": {
+                "original_query": evidence.trace.original_query,
+                "query_variants": list(evidence.trace.query_variants),
+                "mode": evidence.trace.mode.value,
+                "candidate_count": evidence.trace.candidate_count,
+                "result_count": evidence.trace.result_count,
+                "rewrite_applied": evidence.trace.rewrite_applied,
+                "rerank_applied": evidence.trace.rerank_applied,
+                "parent_expansion_applied": evidence.trace.parent_expansion_applied,
+                "fallback_reasons": list(evidence.trace.fallback_reasons),
+                "intent": evidence.trace.intent.value,
+                "strategy": evidence.trace.strategy,
+            },
+        }
+
+    @staticmethod
+    def _chat_evidence(value: dict[str, object] | None) -> ChatEvidence | None:
+        """从 JSONB 恢复历史证据；旧消息或不可用快照安全降级为纯文本。
+
+        证据是答案的辅助快照，不能因旧版记录缺字段而让整个会话正文无法打开。这里严格
+        构造领域枚举和必填字段；任一结构不合法就丢弃整份快照，消息内容仍照常返回。
+        """
+
+        if not value:
+            return None
+        try:
+            raw_citations = cast(list[dict[str, object]], value["citations"])
+            raw_results = cast(list[dict[str, object]], value["results"])
+            raw_trace = cast(dict[str, object], value["trace"])
+
+            def locator(raw: object) -> SourceLocator | None:
+                return (
+                    SourceLocator.from_metadata(cast(dict[str, object], raw))
+                    if isinstance(raw, dict)
+                    else None
+                )
+
+            citations = tuple(
+                Citation(
+                    document_id=str(item["document_id"]),
+                    filename=str(item["filename"]),
+                    chunk_id=str(item["chunk_id"]),
+                    heading_path=tuple(
+                        str(part) for part in Repository._object_list(item.get("heading_path"))
+                    ),
+                    locator=locator(item.get("locator")),
+                    context_chunk_ids=tuple(
+                        str(part) for part in Repository._object_list(item.get("context_chunk_ids"))
+                    ),
+                )
+                for item in raw_citations
+            )
+
+            results: list[RetrievalResult] = []
+            for item in raw_results:
+                assets = tuple(
+                    DocumentAsset(
+                        id=str(asset["id"]),
+                        document_id=str(asset["document_id"]),
+                        block_id=str(asset["block_id"]),
+                        kind=BlockType(str(asset["kind"])),
+                        object_key=str(asset["object_key"]),
+                        media_type=str(asset["media_type"]),
+                        filename=str(asset["filename"]),
+                        title=str(asset["title"]),
+                        description=str(asset.get("description", "")),
+                        sha256=str(asset["sha256"]),
+                        locator=locator(asset.get("locator")),
+                    )
+                    for asset in cast(list[dict[str, object]], item.get("assets", []))
+                )
+                results.append(
+                    RetrievalResult(
+                        chunk_id=str(item["chunk_id"]),
+                        knowledge_base_id=str(item["knowledge_base_id"]),
+                        document_id=str(item["document_id"]),
+                        filename=str(item["filename"]),
+                        content=str(item["content"]),
+                        heading_path=tuple(
+                            str(part) for part in Repository._object_list(item.get("heading_path"))
+                        ),
+                        score=Repository._required_float(item["score"]),
+                        locator=locator(item.get("locator")),
+                        dense_score=Repository._optional_float(item.get("dense_score")),
+                        sparse_score=Repository._optional_float(item.get("sparse_score")),
+                        fusion_score=Repository._optional_float(item.get("fusion_score")),
+                        rerank_score=Repository._optional_float(item.get("rerank_score")),
+                        retrieval_sources=tuple(
+                            str(part)
+                            for part in Repository._object_list(item.get("retrieval_sources"))
+                        ),
+                        matched_content=(
+                            str(item["matched_content"])
+                            if item.get("matched_content") is not None
+                            else None
+                        ),
+                        context_chunk_ids=tuple(
+                            str(part)
+                            for part in Repository._object_list(item.get("context_chunk_ids"))
+                        ),
+                        content_types=tuple(
+                            BlockType(str(part))
+                            for part in Repository._object_list(item.get("content_types"))
+                        ),
+                        assets=assets,
+                    )
+                )
+
+            trace = RetrievalTrace(
+                original_query=str(raw_trace["original_query"]),
+                query_variants=tuple(
+                    str(part) for part in cast(list[object], raw_trace["query_variants"])
+                ),
+                mode=RetrievalMode(str(raw_trace["mode"])),
+                candidate_count=int(cast(int, raw_trace["candidate_count"])),
+                result_count=int(cast(int, raw_trace["result_count"])),
+                rewrite_applied=bool(raw_trace["rewrite_applied"]),
+                rerank_applied=bool(raw_trace["rerank_applied"]),
+                parent_expansion_applied=bool(raw_trace["parent_expansion_applied"]),
+                fallback_reasons=tuple(
+                    str(part) for part in cast(list[object], raw_trace["fallback_reasons"])
+                ),
+                intent=RetrievalIntent(str(raw_trace.get("intent", RetrievalIntent.FACT.value))),
+                strategy=str(raw_trace.get("strategy", "ranked_retrieval")),
+            )
+            return ChatEvidence(citations=citations, results=tuple(results), trace=trace)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _optional_float(value: object) -> float | None:
+        """把 JSON 可选数值恢复为浮点数。"""
+
+        return float(value) if isinstance(value, (int, float)) else None
+
+    @staticmethod
+    def _required_float(value: object) -> float:
+        """恢复 JSON 必填数值，错误结构交给快照级降级处理。"""
+
+        if not isinstance(value, (int, float)):
+            raise TypeError("required evidence score must be numeric")
+        return float(value)
+
+    @staticmethod
+    def _object_list(value: object) -> list[object]:
+        """只接受 JSON Array，缺失可选列表时返回空列表。"""
+
+        return value if isinstance(value, list) else []
 
     @staticmethod
     def _chat_title(question: str) -> str:

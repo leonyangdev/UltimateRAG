@@ -61,9 +61,7 @@ def test_combiner_labels_ocr_and_visual_evidence() -> None:
 
     result = combine_ocr_and_vision("Encoder", "Encoder 通过箭头连接 Decoder。")
 
-    assert result == (
-        "## OCR 文本\n\nEncoder\n\n## 视觉结构\n\nEncoder 通过箭头连接 Decoder。"
-    )
+    assert result == ("## OCR 文本\n\nEncoder\n\n## 视觉结构\n\nEncoder 通过箭头连接 Decoder。")
 
 
 def test_normalizer_drops_explicit_no_retrievable_content_sentinel() -> None:

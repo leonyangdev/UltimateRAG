@@ -209,6 +209,18 @@ async def get_document(document_id: str, request: Request) -> DocumentResponse:
     return DocumentResponse.from_domain(value)
 
 
+@router.post(
+    "/documents/{document_id}/reindex",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def reindex_document(document_id: str, request: Request) -> DocumentResponse:
+    """使用已有 MinIO 原文件重新提交解析、Asset 抽取和索引任务。"""
+
+    value = await container(request).ingestion.reindex(document_id)
+    return DocumentResponse.from_domain(value)
+
+
 @router.get("/chunks/{chunk_id}/preview")
 async def preview_chunk(chunk_id: str, request: Request) -> Response:
     """从 MinIO 原 PDF 按可信页码/BBox 返回命中区域。
@@ -243,6 +255,40 @@ async def preview_chunk(chunk_id: str, request: Request) -> Response:
             "Cache-Control": "private, max-age=86400",
             "ETag": f'"{preview.etag}"',
             "Content-Disposition": "inline",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/assets/{asset_id}/content")
+async def get_asset_content(asset_id: str, request: Request) -> Response:
+    """返回摄取期已抽取并登记的图片 Asset。
+
+    Args:
+        asset_id: 模型 ``asset://`` 标记和 RetrievalResult 共同引用的稳定资源 ID。
+        request: 用于取得应用服务并处理标准条件缓存请求头。
+
+    Returns:
+        READY 文档的原始抽取图片；ETag 命中时返回不含响应体的 304。
+
+    Side Effects:
+        只读访问 PostgreSQL 和 MinIO，不重新运行 PDF Parser、OCR 或 Vision。
+    """
+
+    asset = await container(request).visual_evidence.read_asset(asset_id)
+    quoted_etag = f'"{asset.etag}"'
+    if request.headers.get("if-none-match") == quoted_etag:
+        return Response(
+            status_code=status.HTTP_304_NOT_MODIFIED,
+            headers={"ETag": quoted_etag},
+        )
+    return Response(
+        content=asset.content,
+        media_type=asset.media_type,
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "ETag": quoted_etag,
+            "Content-Disposition": f'inline; filename="{asset.filename}"',
             "X-Content-Type-Options": "nosniff",
         },
     )

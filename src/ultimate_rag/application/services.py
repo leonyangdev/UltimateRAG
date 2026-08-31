@@ -28,9 +28,11 @@ from ultimate_rag.domain.exceptions import DocumentBusyError, InvalidDocumentErr
 from ultimate_rag.domain.models import (
     Citation,
     Document,
+    DocumentAsset,
     DocumentSource,
     DocumentStatus,
     EmbeddedChunk,
+    ParsedAsset,
     RetrievalIntent,
     RetrievalOptions,
     RetrievalResult,
@@ -159,9 +161,31 @@ class IngestionService:
 
         return await self.submit(knowledge_base_id, filename, mime_type, content)
 
+    async def reindex(self, document_id: str) -> Document:
+        """复用 MinIO 原文件，为终态文档重新提交后台解析与索引任务。
+
+        该入口用于 Parser 升级后的存量数据回填，也适用于 FAILED 文档在外部服务恢复后的
+        人工重试。Repository 在行锁内拒绝处理中重复提交，不创建第二份 Document 或原文件。
+
+        Args:
+            document_id: 已存在且处于 READY/FAILED 的文档 ID。
+
+        Returns:
+            已重置为 PENDING 的文档快照。
+
+        Side Effects:
+            只更新 PostgreSQL Document/IngestionJob；Worker 随后读取已有 MinIO 原文件并
+            幂等替换 Asset、Chunk 与 Milvus 索引。
+        """
+
+        return await self._repository.requeue_document(
+            document_id,
+            max_attempts=self._job_max_attempts,
+        )
+
 
 class DocumentProcessingService:
-    """由 Worker 调用的确定性 ``Parse → Chunk → Embed → Index`` 管线。"""
+    """由 Worker 调用的确定性 ``Parse → Chunk/Asset → Embed → Index`` 管线。"""
 
     def __init__(
         self,
@@ -230,6 +254,11 @@ class DocumentProcessingService:
         if not chunks:
             raise InvalidDocumentError("文档没有生成任何 Chunk")
 
+        # 图片二进制不进入 Chunk、Embedding 或 Milvus。Parser 只返回受限内存 Asset，应用层
+        # 在文档 READY 前把它们保存到 MinIO，并用 PostgreSQL 元数据建立可追溯事实。
+        # 这一顺序保证答案永远不会引用尚未完成持久化的 asset:// ID。
+        await self._persist_assets(document, parsed.assets)
+
         # Chunk 保持不可变；使用 dataclasses.replace 只添加展示用文件名。Milvus 检索命中后
         # 可以直接构造 Citation，避免为了每个 Hit 再查询一次 PostgreSQL 形成 N+1。
         chunks = [
@@ -268,6 +297,62 @@ class DocumentProcessingService:
         await self._repository.update_document_status(document.id, DocumentStatus.READY)
         return await self._repository.get_document(document.id)
 
+    async def _persist_assets(
+        self,
+        document: Document,
+        parsed_assets: tuple[ParsedAsset, ...],
+    ) -> None:
+        """幂等保存 Parser 资源，并替换 PostgreSQL 元数据事实。
+
+        Args:
+            document: 当前后台任务处理的文档事实，用于生成隔离 Object Key。
+            parsed_assets: Parser 已限制格式和大小的资源；当前 PDF 只产生 JPEG 图片。
+
+        Side Effects:
+            先向 MinIO 写入稳定 Asset Key，再删除本次解析已不存在的旧对象，最后在一个
+            PostgreSQL 事务内替换资源元数据。任一步失败都会阻止文档进入 READY。
+
+        重要限制：
+            MinIO 与 PostgreSQL 没有分布式事务。新对象 Key 由 Asset ID 稳定生成，数据库
+            提交失败后的 Worker 重试会覆盖同一对象，不会不断产生随机孤儿。
+        """
+
+        previous = await self._repository.list_document_assets([document.id])
+        persisted: list[DocumentAsset] = []
+
+        # 阶段 1：先写新对象。若网络中途失败，数据库仍指向旧的完整资源集合；已成功写入的
+        # 新对象使用稳定 Key，下次重试会安全覆盖而不是制造重复资源。
+        for asset in parsed_assets:
+            extension = ".jpg" if asset.media_type == "image/jpeg" else ".bin"
+            object_key = f"{document.knowledge_base_id}/{document.id}/assets/{asset.id}{extension}"
+            await self._storage.put(object_key, asset.content, asset.media_type)
+            persisted.append(
+                DocumentAsset(
+                    id=asset.id,
+                    document_id=document.id,
+                    block_id=asset.block_id,
+                    kind=asset.kind,
+                    object_key=object_key,
+                    media_type=asset.media_type,
+                    filename=asset.filename,
+                    title=asset.title,
+                    description=asset.description,
+                    sha256=hashlib.sha256(asset.content).hexdigest(),
+                    locator=asset.locator,
+                )
+            )
+
+        # 阶段 2：删除当前解析不再产生的旧资源。删除位于数据库替换前，失败时旧事实仍然
+        # 可供下一次重试定位；文档尚未 READY，因此短暂的对象缺失不会被正常检索读取。
+        current_keys = {asset.object_key for asset in persisted}
+        for old_asset in previous:
+            if old_asset.object_key not in current_keys:
+                await self._storage.delete(old_asset.object_key)
+
+        # 阶段 3：元数据使用“先删后插”的单库事务替换。Asset ID、Block ID 和 Object Key
+        # 至此全部稳定，后续 Chunk/Vector 写入或 Worker 重试不会破坏资源引用。
+        await self._repository.replace_document_assets(document.id, persisted)
+
     async def cleanup_partial_index(self, document_id: str) -> None:
         """失败后尽力清理可能只写入一部分的 Milvus 派生向量。
 
@@ -293,7 +378,11 @@ class RAGService:
 禁止使用“为后续模型/行业奠定基础、开启新时代、影响后来工作”等发表后影响评价，除非
 <knowledge_context> 明确逐字讨论了该影响。总结结尾只能概括文档自身陈述的贡献与结论。
 输出前检查每个事实陈述都能由某个 [来源 N] 直接支持。
-回答应清晰、简洁，并使用 [来源 N] 标记依据。"""
+引用必须写成可点击格式 [来源 N](citation://N)，N 必须对应 knowledge_context 的真实编号。
+如果用户要求查看图片、架构图、流程图或图表，且来源提供“可展示资源”，必须把其中完整的
+Markdown 图片标记原样放入答案；不得回答“无法展示图片”，不得修改或编造 asset:// ID。
+如果证据包含 Markdown 表格且表格有助于回答，可以直接保留表格源数据并附可点击来源。
+回答应清晰、简洁；不要输出未在可展示资源中声明的外部图片地址。"""
 
     def __init__(
         self,
@@ -510,9 +599,13 @@ class DocumentLifecycleService:
             # 当前版本明确拒绝该竞态，用户可在任务进入终态后重试删除。
             raise DocumentBusyError("文档正在后台处理，完成或失败后才能删除")
 
+        assets = await self._repository.list_document_assets([document_id])
+
         # PostgreSQL 放在最后删除：前两步中断时，事实记录仍能告诉补偿操作应该清理什么。
         # 任一步异常都继续上抛，API 不能在外部资源仍残留时返回虚假的 204 成功。
         await self._vector_store.delete_by_document(document_id)
+        for asset in assets:
+            await self._storage.delete(asset.object_key)
         await self._storage.delete(document.object_key)
         await self._repository.delete_document(document_id)
 
@@ -528,9 +621,15 @@ class DocumentLifecycleService:
         ):
             raise DocumentBusyError("知识库仍有文档正在后台处理，完成或失败后才能删除")
 
+        assets = await self._repository.list_document_assets(
+            [document.id for document in documents]
+        )
+
         # Milvus 支持按知识库过滤条件批量删除，MinIO 则按系统 Object Key 逐个删除。
         # PostgreSQL 事实仍然最后提交删除，使中途失败后可以使用同一调用重新清理。
         await self._vector_store.delete_by_knowledge_base(knowledge_base_id)
+        for asset in assets:
+            await self._storage.delete(asset.object_key)
         for document in documents:
             await self._storage.delete(document.object_key)
         await self._repository.delete_knowledge_base(knowledge_base_id)

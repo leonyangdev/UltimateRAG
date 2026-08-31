@@ -10,6 +10,8 @@ V3.0 的主题是 **Advanced Retrieval**：保留 V2 的文档智能摄取，把
 - 只在勾选的文档内检索，最多 50 份
 - 在检索调试页查看查询变体、候选数、降级原因及每阶段分数
 - 在聊天证据卡中查看相同 Trace，不为展示信息重复检索
+- 在答案正文显示 PDF 图片和 GFM 表格，点击来源链接打开右侧证据栏
+- 恢复历史会话时继续查看当轮 Citation、检索 Trace 和图片 Asset
 - 使用 JSONL 标注集比较 Precision@k、Recall@k、MRR@k、nDCG@k
 
 ## 2. 默认查询链路
@@ -63,7 +65,18 @@ uv run python scripts/rebuild_sparse_index.py
 
 应用启动不会偷偷迁移大量索引。修改 Analyzer 或 BM25 参数后也应显式重建。
 
-## 6. V3 的边界
+PDF Parser 升级后的存量 READY 文档还需要在知识库工作台点击“重新解析”，或调用
+`POST /api/documents/{id}/reindex`。该操作复用 MinIO 原文件并由 Worker 后台回填图片 Asset、
+新 Chunk 与向量，不要求重新上传。
+
+## 6. 多模态回答与来源边界
+
+图片不是作为 Base64 塞入 Prompt，而是使用 `asset://稳定ID`。二进制在 MinIO，元数据在
+PostgreSQL，检索完成后按 Chunk 批量关联；前端只有在本消息证据白名单内才加载对应 API。
+表格继续使用 Markdown 源数据。`[来源 N](citation://N)` 点击后打开右侧侧栏，展示精确 Locator、
+检索文本、图片或 PDF BBox 预览。
+
+## 7. V3 的边界
 
 - 文档过滤是业务筛选，不是 ACL；身份、组织、权限与审计属于 V4
 - JSONL 指标工具用于 V3 调参，不是 V5 Golden Dataset/RAGOps 平台
