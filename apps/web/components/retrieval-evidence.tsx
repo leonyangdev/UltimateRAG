@@ -23,6 +23,7 @@ interface RetrievalEvidenceProps {
   results: RetrievalResult[];
   trace?: RetrievalTrace | null;
   defaultOpen?: boolean;
+  onSourceClick?: (sourceNumber: number) => void;
 }
 
 const fallbackLabels: Record<string, string> = {
@@ -95,12 +96,15 @@ function EvidencePreview({ result }: EvidencePreviewProps) {
 /**
  * 展示可追溯的检索证据，而不是只给用户一个不可验证的模型答案。
  * 使用原生 details 保留键盘可访问性，并避免为简单折叠行为引入额外客户端状态。
+ * 在回答场景中，结果标题按 Citation 的真实顺序打开右侧来源栏；检索调试场景没有
+ * Citation 快照，因此仍显示卡片，但不会把结果数组下标伪装成答案来源编号。
  */
 export function RetrievalEvidence({
   citations = [],
   results,
   trace = null,
   defaultOpen = false,
+  onSourceClick,
 }: RetrievalEvidenceProps) {
   if (results.length === 0 && !trace) return null;
 
@@ -153,6 +157,8 @@ export function RetrievalEvidence({
 
         {results.map((result, index) => {
           const citation = citations.find((item) => item.chunk_id === result.chunk_id);
+          const citationIndex = citations.findIndex((item) => item.chunk_id === result.chunk_id);
+          const sourceNumber = citationIndex >= 0 ? citationIndex + 1 : null;
           const locator = citation?.locator ?? result.locator;
           const heading = formatLocator(locator, citation?.heading_path ?? result.heading_path);
 
@@ -160,14 +166,29 @@ export function RetrievalEvidence({
             <Card key={result.chunk_id} className="rounded-2xl border-border bg-background py-0 shadow-none">
               <CardContent className="space-y-3 p-4">
                 <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-foreground">
-                      [{index + 1}] {result.filename}
-                    </p>
-                    <p className="mt-1 truncate text-sm text-muted-foreground">
-                      {heading}
-                    </p>
-                  </div>
+                  {sourceNumber !== null && onSourceClick ? (
+                    <button
+                      type="button"
+                      onClick={() => onSourceClick(sourceNumber)}
+                      aria-label={`打开来源 ${sourceNumber}：${result.filename}`}
+                      aria-haspopup="dialog"
+                      className="min-w-0 flex-1 rounded-lg text-left outline-none transition-colors hover:text-primary focus-visible:ring-2 focus-visible:ring-ring/50"
+                    >
+                      <span className="block truncate text-sm font-semibold text-foreground">
+                        [来源 {sourceNumber}] {result.filename}
+                      </span>
+                      <span className="mt-1 block truncate text-sm text-muted-foreground">
+                        {heading}
+                      </span>
+                    </button>
+                  ) : (
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-foreground">
+                        [{index + 1}] {result.filename}
+                      </p>
+                      <p className="mt-1 truncate text-sm text-muted-foreground">{heading}</p>
+                    </div>
+                  )}
                   <div className="flex shrink-0 flex-col items-end gap-1">
                     <Badge variant="outline" className="font-mono text-sm tabular-nums">
                       最终 {result.score.toFixed(4)}

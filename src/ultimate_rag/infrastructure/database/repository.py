@@ -111,6 +111,72 @@ class Repository:
                 raise ResourceNotFoundError("会话不存在")
             return self._chat_session(model)
 
+    async def delete_chat_session(
+        self,
+        knowledge_base_id: str,
+        session_id: str,
+        *,
+        stale_after_seconds: int,
+    ) -> None:
+        """删除当前知识库范围内的一条会话及其全部消息事实。
+
+        会话 ID 虽然全局唯一，但删除属于知识库资源管理操作，因此必须同时验证知识库 ID
+        和会话归属。跨知识库传入真实会话 ID 时仍按“会话不存在”处理，避免越权调用者
+        根据错误差异探测其他知识库中的会话。仍有有效流式生成的会话不能删除，否则生成
+        结束时无法提交助手消息；超过与轮次恢复一致的过期窗口后，PENDING 占位不再阻塞清理。
+
+        Args:
+            knowledge_base_id: 路由路径中声明的知识库 ID。
+            session_id: 要删除的聊天会话 ID。
+            stale_after_seconds: PENDING 助手消息的有效窗口，来源与 ``ChatService`` 开始轮次
+                使用的部署配置相同，避免删除和发送对“失活生成”作出不同判断。
+
+        Raises:
+            ResourceNotFoundError: 知识库不存在，或会话不存在/不属于当前知识库。
+            ChatSessionBusyError: 会话仍存在有效的 PENDING 助手消息。
+
+        Side Effects:
+            在一个数据库事务内删除 ``chat_sessions`` 记录；SQLAlchemy 关系级联与数据库
+            ``ON DELETE CASCADE`` 共同保证关联 ``chat_messages`` 不会成为孤儿记录。
+        """
+
+        stale_before = datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
+        async with self._session_factory() as session, session.begin():
+            # 先区分“知识库不存在”和“该知识库没有这条会话”，保持已有资源 API 的错误语义。
+            # 随后的范围查询锁住会话行，并与 begin_chat_turn 使用相同的锁顺序；这样检查
+            # PENDING 与删除父会话之间不会插入一个新的生成轮次。
+            if await session.get(KnowledgeBaseModel, knowledge_base_id) is None:
+                raise ResourceNotFoundError("知识库不存在")
+            model = await session.scalar(
+                select(ChatSessionModel)
+                .where(
+                    ChatSessionModel.id == session_id,
+                    ChatSessionModel.knowledge_base_id == knowledge_base_id,
+                )
+                .with_for_update()
+            )
+            if model is None:
+                raise ResourceNotFoundError("会话不存在")
+
+            # PENDING 的 updated_at 是轮次开始时间；其有效窗口与发送新问题时的崩溃恢复规则
+            # 完全一致。有效生成返回 409，过期占位则随整个会话一起删除，无需先写 FAILED。
+            active_pending = await session.scalar(
+                select(ChatMessageModel.id)
+                .where(
+                    ChatMessageModel.session_id == session_id,
+                    ChatMessageModel.role == ChatRole.ASSISTANT.value,
+                    ChatMessageModel.status == ChatMessageStatus.PENDING.value,
+                    ChatMessageModel.updated_at > stale_before,
+                )
+                .limit(1)
+            )
+            if active_pending is not None:
+                raise ChatSessionBusyError("当前会话正在生成回答，请等待完成后再删除")
+
+            # messages 关系使用 delete-orphan，外键也声明 ON DELETE CASCADE；父会话提交删除时，
+            # 消息与会话处于同一个事务边界，不会出现列表已消失但历史消息仍残留的中间状态。
+            await session.delete(model)
+
     async def list_chat_messages(self, session_id: str) -> list[ChatMessage]:
         """按序返回会话全部消息，包括可供前端解释的失败生成。"""
 
