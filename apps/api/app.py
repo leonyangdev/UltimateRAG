@@ -169,6 +169,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             runtime.repository,
             runtime.storage,
             runtime.vector_store,
+            runtime.chunk_snapshot_store,
         ),
     )
 

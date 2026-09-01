@@ -20,7 +20,13 @@ from ultimate_rag.domain.models import (
     RetrievalTrace,
     SourceLocator,
 )
-from ultimate_rag.domain.ports import Chunker, Embedder, ObjectStorage, VectorStore
+from ultimate_rag.domain.ports import (
+    Chunker,
+    ChunkSnapshotStore,
+    Embedder,
+    ObjectStorage,
+    VectorStore,
+)
 from ultimate_rag.infrastructure.database.repository import Repository
 from ultimate_rag.parsers.registry import ParserRegistry
 
@@ -58,6 +64,7 @@ async def test_processing_service_persists_asset_with_stable_object_key() -> Non
         storage=cast(ObjectStorage, storage),
         parser_registry=cast(ParserRegistry, object()),
         chunker=cast(Chunker, object()),
+        chunk_snapshot_store=cast(ChunkSnapshotStore, object()),
         embedder=cast(Embedder, object()),
         vector_store=cast(VectorStore, object()),
     )

@@ -79,8 +79,8 @@ return DocumentResponse.from_domain(value)          # 202 + PENDING
 
 ### 4.4 处理：`application/services.py` → `DocumentProcessingService.process`
 
-四个阶段（Parse → Chunk/Asset → Embed → Index），每阶段先更新状态再干活。图片 Asset 必须先于
-Embedding 完成持久化，**READY 仍在最后。**
+五个阶段（Parse → Chunk/Asset → Snapshot → Embed → Index），每个公开阶段先更新状态再干活。
+图片 Asset 和最终 Chunk JSON 必须先于 Embedding 完成持久化，**READY 仍在最后。**
 
 ### 4.5 数据落库：`repository.py` → `replace_chunks` / `update_document_status`
 

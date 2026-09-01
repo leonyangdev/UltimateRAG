@@ -15,6 +15,8 @@ apps/docs/.vitepress/cache/
 apps/docs/.vitepress/dist/
 apps/web/out/
 *.tsbuildinfo
+# 摄取阶段生成的 Chunk 明文诊断快照，可能包含敏感业务内容。
+/data/chunk_snapshots/
 .idea/
 .vscode/
 

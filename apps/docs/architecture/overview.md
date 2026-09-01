@@ -105,8 +105,8 @@ runtime.py（Composition Root）
 │  (src/ultimate_rag/worker)│
 │                          │
 │ 领取 Job → Process：      │
-│ Parse → Chunk/Asset → Embed │
-│  → Index → READY         │
+│ Parse → Chunk/Asset → Snapshot│
+│  → Embed → Index → READY │
 └────────────┬──────────────┘
              │
              ▼
@@ -121,6 +121,7 @@ runtime.py（Composition Root）
 |---|---|---|
 | `DocumentParser` | 解析原始文件为统一模型 | Markdown / Word / Excel / PPT / HTML / PDF / Image |
 | `Chunker` | 切块 | `StructureAwareChunker` |
+| `ChunkSnapshotStore` | 保存/清理 Embedding 前可读快照 | `LocalChunkSnapshotStore` |
 | `Embedder` | 文本 → 向量 | `BailianEmbedder` |
 | `VectorStore` | Dense/Sparse 派生索引写入与检索 | `MilvusVectorStore` |
 | `QueryRewriter` | 生成一个保守查询变体 | `BailianQueryRewriter` |

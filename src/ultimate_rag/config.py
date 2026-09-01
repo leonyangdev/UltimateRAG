@@ -4,6 +4,7 @@
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated
 
 from pydantic import Field, field_validator, model_validator
@@ -73,6 +74,8 @@ class Settings(BaseSettings):
     chunk_max_tokens: int = Field(default=512, ge=64, le=8192)
     chunk_overlap_tokens: int = Field(default=64, ge=0, le=2048)
     chunk_tokenizer: str = "cl100k_base"
+    # 快照在 Embedding 前保存最终 Chunk 明文，用于切块质量检查；Docker 会把该目录绑定到宿主机。
+    chunk_snapshot_dir: Path = Path("data/chunk_snapshots")
     retrieval_top_k: int = Field(default=5, ge=1, le=20)
     # 先广召回 30 个候选、再收敛到 top_k；该基线必须继续通过真实评估集调优。
     retrieval_candidate_k: int = Field(default=30, ge=1, le=100)

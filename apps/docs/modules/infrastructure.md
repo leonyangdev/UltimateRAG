@@ -128,6 +128,9 @@ def create_processing_runtime(settings) -> ProcessingRuntime:
 | MinIO | ✅ 对象来源 | 原始文件和抽取图片，可排查、可重建 |
 | Milvus | ❌ 派生索引 | 可由 PostgreSQL Chunk + Embedder 重建 |
 
+`LocalChunkSnapshotStore` 另行保存 Embedding 前 JSON，便于人工审查。它是可重建诊断副本，
+不是业务事实来源；API 删除文档/知识库时会同步清理这份明文。
+
 ## 下一步
 
 - 数据库表 / 领域模型的对应关系 → [数据模型](/architecture/data-model)

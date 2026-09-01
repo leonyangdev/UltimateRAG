@@ -8,6 +8,7 @@ from typing import Protocol
 
 from ultimate_rag.domain.models import (
     Chunk,
+    Document,
     DocumentPreview,
     DocumentSource,
     EmbeddedChunk,
@@ -37,6 +38,34 @@ class Chunker(Protocol):
 
     async def split(self, document: ParsedDocument, knowledge_base_id: str) -> list[Chunk]:
         """切分文档并为每个结果生成稳定 ID。"""
+        ...
+
+
+class ChunkSnapshotStore(Protocol):
+    """在 Embedding 前保存可读 Chunk 快照的持久化边界。
+
+    快照用于开发调试、切块质量检查和问题审计，不替代 PostgreSQL 中的 Chunk 事实，
+    也不参与在线检索。应用层只依赖本端口，因此不会绑定本地文件系统或具体 JSON 实现。
+    """
+
+    async def save(
+        self,
+        *,
+        document: Document,
+        parsed_document: ParsedDocument,
+        parser_name: str,
+        parser_version: str,
+        chunks: Sequence[Chunk],
+    ) -> None:
+        """原子保存一份最终 Chunk 文本、定位信息与 metadata。"""
+        ...
+
+    async def delete_by_document(self, knowledge_base_id: str, document_id: str) -> None:
+        """幂等删除指定文档的本地明文快照。"""
+        ...
+
+    async def delete_by_knowledge_base(self, knowledge_base_id: str) -> None:
+        """幂等删除指定知识库的全部本地明文快照。"""
         ...
 
 

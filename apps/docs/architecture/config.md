@@ -42,6 +42,7 @@ settings = get_settings()   # 进程内单例，只解析一次
 | `MILVUS_COLLECTION` | `knowledge_chunks` | Dense Collection |
 | `MILVUS_SPARSE_COLLECTION` | `knowledge_chunks_sparse_v3` | BM25 Sparse Collection |
 | `BM25_K1` / `BM25_B` | `1.2` / `0.75` | BM25 基线参数；修改后需显式重建 Sparse 索引 |
+| `CHUNK_SNAPSHOT_DIR` | `data/chunk_snapshots` | Embedding 前最终 Chunk 明文 JSON 目录 |
 
 ### 模型（阿里云百炼）
 
@@ -139,12 +140,16 @@ LLM_MODEL=qwen-plus
 OCR_MODEL=qwen3.5-ocr
 VISION_MODEL=qwen3-vl-flash
 
+# Chunk 明文诊断快照（Docker Compose 会覆盖为容器 bind mount 目标）
+CHUNK_SNAPSHOT_DIR=data/chunk_snapshots
+
 # 前端
 NEXT_PUBLIC_API_URL=
 ```
 
 ::: warning 安全提醒
 `.env`、真实 API Key、生产凭据**禁止提交到 Git**。`.env.example` 只能包含安全占位值。
+`CHUNK_SNAPSHOT_DIR` 中保存的是文档明文，必须限制目录权限、监控磁盘容量，并保持 Git 忽略。
 :::
 
 ## 下一步

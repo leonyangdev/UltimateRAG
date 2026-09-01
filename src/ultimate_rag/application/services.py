@@ -39,7 +39,14 @@ from ultimate_rag.domain.models import (
     RetrievalRun,
     RetrievalTrace,
 )
-from ultimate_rag.domain.ports import Chunker, Embedder, LLMClient, ObjectStorage, VectorStore
+from ultimate_rag.domain.ports import (
+    Chunker,
+    ChunkSnapshotStore,
+    Embedder,
+    LLMClient,
+    ObjectStorage,
+    VectorStore,
+)
 from ultimate_rag.infrastructure.database.repository import Repository
 from ultimate_rag.parsers.registry import ParserRegistry
 
@@ -185,7 +192,12 @@ class IngestionService:
 
 
 class DocumentProcessingService:
-    """由 Worker 调用的确定性 ``Parse → Chunk/Asset → Embed → Index`` 管线。"""
+    """由 Worker 调用的 ``Parse → Chunk/Asset/Snapshot → Embed → Index`` 管线。
+
+    本服务显式保证本地 Chunk 快照先于 Embedding 和 Milvus 写入。这样排查检索问题时可以
+    检查模型真正收到的最终文本与 metadata，同时避免快照写盘失败后仍产生模型费用或
+    半成品向量。快照只是诊断副本，PostgreSQL 仍是 Chunk 事实来源。
+    """
 
     def __init__(
         self,
@@ -194,6 +206,7 @@ class DocumentProcessingService:
         storage: ObjectStorage,
         parser_registry: ParserRegistry,
         chunker: Chunker,
+        chunk_snapshot_store: ChunkSnapshotStore,
         embedder: Embedder,
         vector_store: VectorStore,
     ) -> None:
@@ -203,6 +216,7 @@ class DocumentProcessingService:
         self._storage = storage
         self._parser_registry = parser_registry
         self._chunker = chunker
+        self._chunk_snapshot_store = chunk_snapshot_store
         self._embedder = embedder
         self._vector_store = vector_store
 
@@ -217,7 +231,8 @@ class DocumentProcessingService:
             Exception: 外部处理失败时保留原始异常，由 Worker 决定是否有限重试。
 
         Side Effects:
-            更新 PostgreSQL 文档状态和 Chunk，删除并重建该文档的 Milvus 向量。
+            更新 PostgreSQL 文档状态和 Chunk，原子覆盖本地 Chunk JSON 快照，并删除、重建
+            该文档的 Milvus 向量。
         """
 
         document = await self._repository.get_document(document_id)
@@ -273,7 +288,18 @@ class DocumentProcessingService:
             for chunk in chunks
         ]
 
-        # 阶段 3 — Embed：应用层一次提交全部文本，Adapter 再按供应商 Batch 上限有界分批。
+        # 阶段 3 — Snapshot：保存最终 Chunk 文本、Locator、Parser metadata 和切块 metadata。
+        # 该步骤位于 Embedding 前并采用 fail-closed：写盘失败会交给 Worker 有限重试，不能让
+        # “进入向量库的内容”和“本地可审查快照”悄悄分叉。Embedding 向量不进入此 JSON。
+        await self._chunk_snapshot_store.save(
+            document=document,
+            parsed_document=parsed,
+            parser_name=parser.name,
+            parser_version=parser.version,
+            chunks=chunks,
+        )
+
+        # 阶段 4 — Embed：应用层一次提交全部文本，Adapter 再按供应商 Batch 上限有界分批。
         # 这样业务流程不依赖百炼限制，也避免每个 Chunk 单独发一次网络请求。
         await self._repository.update_document_status(document.id, DocumentStatus.EMBEDDING)
         vectors = await self._embedder.embed_documents([chunk.content for chunk in chunks])
@@ -285,7 +311,7 @@ class DocumentProcessingService:
             for chunk, vector in zip(chunks, vectors, strict=True)
         ]
 
-        # 阶段 4 — Index：先以单库事务替换 PostgreSQL Chunk，再重建 Milvus 派生向量。
+        # 阶段 5 — Index：先以单库事务替换 PostgreSQL Chunk，再重建 Milvus 派生向量。
         # 重试时删除旧向量并按稳定 Chunk ID upsert，避免内容变化后遗留旧索引或产生重复实体。
         await self._repository.update_document_status(document.id, DocumentStatus.INDEXING)
         await self._repository.replace_chunks(document.id, chunks)
@@ -568,10 +594,10 @@ Markdown 图片标记原样放入答案；不得回答“无法展示图片”�
 
 
 class DocumentLifecycleService:
-    """协调文档/知识库在三类存储中的删除。
+    """协调文档/知识库在事实存储、索引和本地明文快照中的删除。
 
-    当前 V3 为同步尽力删除：先清理派生索引与原文件，最后删除 PostgreSQL 事实记录；任一步失败都会
-    向上抛出，避免向用户谎报成功。V4 再引入补偿任务与可靠重试。
+    当前 V3 为同步尽力删除：先清理派生索引、本地快照与原文件，最后删除 PostgreSQL 事实
+    记录；任一步失败都会向上抛出，避免向用户谎报成功。V4 再引入补偿任务与可靠重试。
     """
 
     def __init__(
@@ -579,14 +605,16 @@ class DocumentLifecycleService:
         repository: Repository,
         storage: ObjectStorage,
         vector_store: VectorStore,
+        chunk_snapshot_store: ChunkSnapshotStore,
     ) -> None:
-        """注入三类存储边界，用于协调同步删除。"""
+        """注入事实、对象、向量与本地快照边界，用于协调同步删除。"""
         self._repository = repository
         self._storage = storage
         self._vector_store = vector_store
+        self._chunk_snapshot_store = chunk_snapshot_store
 
     async def delete_document(self, document_id: str) -> None:
-        """按派生向量、原文件、事实记录的顺序同步删除一份文档。
+        """按派生向量、本地快照、原文件、事实记录的顺序同步删除一份文档。
 
         删除失败时保留异常并停止后续步骤。V3 没有跨存储事务或后台补偿任务，保留最后的
         PostgreSQL 事实记录可以让运维人员继续定位尚未清理的外部资源。
@@ -601,16 +629,20 @@ class DocumentLifecycleService:
 
         assets = await self._repository.list_document_assets([document_id])
 
-        # PostgreSQL 放在最后删除：前两步中断时，事实记录仍能告诉补偿操作应该清理什么。
+        # PostgreSQL 放在最后删除：前置步骤中断时，事实记录仍能告诉补偿操作应该清理什么。
         # 任一步异常都继续上抛，API 不能在外部资源仍残留时返回虚假的 204 成功。
         await self._vector_store.delete_by_document(document_id)
+        await self._chunk_snapshot_store.delete_by_document(
+            document.knowledge_base_id,
+            document.id,
+        )
         for asset in assets:
             await self._storage.delete(asset.object_key)
         await self._storage.delete(document.object_key)
         await self._repository.delete_document(document_id)
 
     async def delete_knowledge_base(self, knowledge_base_id: str) -> None:
-        """同步清理知识库范围内的向量、原文件和级联数据库事实。"""
+        """同步清理知识库范围内的向量、本地快照、原文件和级联数据库事实。"""
 
         # 删除数据库前先获取文档快照；若先触发级联删除，之后将失去所有 MinIO Object Key，
         # 无法知道知识库曾经包含哪些需要清理的原始文件。
@@ -625,9 +657,10 @@ class DocumentLifecycleService:
             [document.id for document in documents]
         )
 
-        # Milvus 支持按知识库过滤条件批量删除，MinIO 则按系统 Object Key 逐个删除。
+        # Milvus 与本地快照支持按知识库整体删除，MinIO 则按系统 Object Key 逐个删除。
         # PostgreSQL 事实仍然最后提交删除，使中途失败后可以使用同一调用重新清理。
         await self._vector_store.delete_by_knowledge_base(knowledge_base_id)
+        await self._chunk_snapshot_store.delete_by_knowledge_base(knowledge_base_id)
         for asset in assets:
             await self._storage.delete(asset.object_key)
         for document in documents:

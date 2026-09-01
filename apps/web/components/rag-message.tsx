@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, User } from "lucide-react";
+import { Bot, Check, Copy } from "lucide-react";
 import { useState } from "react";
 
 import type {
@@ -29,6 +29,7 @@ interface RAGMessageProps {
  */
 export function RAGMessage({ message }: RAGMessageProps) {
   const [selectedSource, setSelectedSource] = useState<number | null>(null);
+  const [isCopied, setIsCopied] = useState(false);
   const isUser = message.role === "user";
   const text = message.parts
     .filter((part) => part.type === "text")
@@ -46,42 +47,62 @@ export function RAGMessage({ message }: RAGMessageProps) {
     }
   }
 
+  /**
+   * 复制动作只处理当前消息已经渲染的纯文本，不复制隐藏的 Retrieval 快照或内部 Asset ID。
+   * Clipboard API 失败不会遮挡答案；按钮保持原图标，让用户可以再次尝试或手动选择正文。
+   */
+  async function copyAnswer() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setIsCopied(true);
+      window.setTimeout(() => setIsCopied(false), 1600);
+    } catch {
+      setIsCopied(false);
+    }
+  }
+
   return (
-    <article className={`flex gap-3 ${isUser ? "justify-end" : "justify-start"}`}>
+    <article className={`group flex gap-3 ${isUser ? "justify-end" : "justify-start"}`}>
       {!isUser && (
-        <Avatar className="mt-1 size-7 shrink-0 border border-border bg-foreground text-background">
+        <Avatar className="mt-0.5 size-7 shrink-0 border-0 bg-foreground text-background shadow-sm">
           <AvatarFallback className="bg-foreground text-background">
             <Bot className="size-3.5" />
           </AvatarFallback>
         </Avatar>
       )}
 
-      <div className={`min-w-0 space-y-3 ${isUser ? "max-w-[80%] order-first" : ""}`}>
+      <div className={`min-w-0 space-y-3 ${isUser ? "max-w-[85%] sm:max-w-[75%]" : "flex-1"}`}>
         {isUser ? (
-          /* 用户消息：柔和圆角气泡，纯文本展示 */
-          <div className="rounded-2xl rounded-tr-md bg-secondary px-4 py-3 text-sm leading-6 text-foreground">
+          /* 用户消息保留轻量灰色气泡；助手答案继续使用无背景正文，形成明确角色层级。 */
+          <div className="rounded-[20px] bg-[#f4f4f4] px-4 py-2.5 text-[15px] leading-6 text-foreground dark:bg-[#2f2f2f]">
             <p className="whitespace-pre-wrap">{text}</p>
           </div>
         ) : (
-          /* 助手消息：ChatGPT 风格，无背景，Markdown 渲染 */
-          <div className="prose-chat text-sm leading-7 text-foreground">
-            <AnswerMarkdown
-              content={text}
-              results={results}
-              onCitationClick={setSelectedSource}
-            />
-          </div>
+          <>
+            <div className="prose-chat text-[15px] leading-7 text-foreground">
+              <AnswerMarkdown
+                content={text}
+                results={results}
+                onCitationClick={setSelectedSource}
+              />
+            </div>
+            {text && (
+              <div className="flex min-h-8 items-center gap-1 text-muted-foreground opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+                <button
+                  type="button"
+                  onClick={() => void copyAnswer()}
+                  className="grid size-8 place-items-center rounded-lg hover:bg-muted hover:text-foreground"
+                  aria-label={isCopied ? "回答已复制" : "复制回答"}
+                  title={isCopied ? "已复制" : "复制"}
+                >
+                  {isCopied ? <Check className="size-4" /> : <Copy className="size-4" />}
+                </button>
+              </div>
+            )}
+          </>
         )}
         {!isUser && <RetrievalEvidence citations={citations} results={results} trace={trace} />}
       </div>
-
-      {isUser && (
-        <Avatar className="mt-1 size-7 shrink-0 border border-border">
-          <AvatarFallback>
-            <User className="size-3.5" />
-          </AvatarFallback>
-        </Avatar>
-      )}
       {!isUser && (
         <SourceSidebar
           sourceNumber={selectedSource}

@@ -13,11 +13,11 @@ Application 层是**业务工作流的编排者**：它不知道文件怎么解�
 | 组件 | 职责 |
 |---|---|
 | `IngestionService` | 校验上传、存原文件、创建文档+任务（同步，返回 202） |
-| `DocumentProcessingService` | 后台处理管线：Parse → Chunk/Asset → Embed → Index（由 Worker 调用） |
+| `DocumentProcessingService` | 后台处理：Parse → Chunk/Asset → 本地 Snapshot → Embed → Index |
 | `RetrievalService` | 独立检索：事实过滤 → 改写 → Dense/BM25 → RRF → 重排 → Small2Big |
 | `RAGService` | 问答：检索 → 拼上下文 → LLM → 答案 + 引用 |
 | `VisualEvidenceService` | 读取持久化 Asset，或协调 MinIO 原 PDF 与 PDFium 局部预览 |
-| `DocumentLifecycleService` | 删除文档/知识库，协调三类存储清理 |
+| `DocumentLifecycleService` | 删除文档/知识库，协调事实、对象、索引与本地明文快照清理 |
 | `ContextBuilder` | 把检索结果拼接成带来源编号的 LLM 上下文 |
 
 ## 3. IngestionService —— 上传入队
@@ -84,14 +84,25 @@ async def process(self, document_id: str) -> Document:
     if not chunks:
         raise InvalidDocumentError("文档没有生成任何 Chunk")   # 空文档不调用付费 Embedding
 
-    # 阶段 3 — Embed
+    # 阶段 3 — Snapshot：Asset 持久化并补齐最终 metadata 后，原子覆盖本地 JSON
+    await self._persist_assets(document, parsed.assets)
+    chunks = [replace(chunk, metadata={
+        **chunk.metadata,
+        "filename": document.filename,
+        "source_locator": chunk.locator.to_metadata() if chunk.locator else {},
+    }) for chunk in chunks]
+    await self._chunk_snapshot_store.save(
+        document=document, parsed_document=parsed,
+        parser_name=parser.name, parser_version=parser.version, chunks=chunks)
+
+    # 阶段 4 — Embed
     await self._repository.update_document_status(document.id, DocumentStatus.EMBEDDING)
     vectors = await self._embedder.embed_documents([c.content for c in chunks])
 
     # strict=True：每个 Chunk 必须恰好对应一个向量，错配必须失败
     embedded = [EmbeddedChunk(chunk=c, embedding=tuple(v)) for c, v in zip(chunks, vectors, strict=True)]
 
-    # 阶段 4 — Index：先替换 PostgreSQL Chunk，再重建 Milvus 向量
+    # 阶段 5 — Index：先替换 PostgreSQL Chunk，再重建 Milvus 向量
     await self._repository.update_document_status(document.id, DocumentStatus.INDEXING)
     await self._repository.replace_chunks(document.id, chunks)      # 事务内先删后插
     await self._vector_store.delete_by_document(document.id)         # 幂等重建
@@ -105,6 +116,7 @@ async def process(self, document_id: str) -> Document:
 ### 关键设计
 
 - **状态先于动作更新**：进程中断时，数据库会停留在「最后开始的阶段」，便于定位故障
+- **快照先于 Embedding**：最终 Chunk + metadata 可直接审查；写盘失败不产生模型费用或向量
 - **READY 放在最后**：全部成功才算完成
 - **幂等**：稳定 Chunk ID + 文档级向量删除重建，重试结果一致
 - 失败时 `cleanup_partial_index()` 清理半成品向量（Milvus），保留 PostgreSQL 事实和 MinIO 原文件
@@ -184,7 +196,7 @@ async def _prepare_generation(self, knowledge_base_id, question, top_k):
 
 ### 职责
 
-协调删除文档/知识库，跨三类存储。
+协调删除文档/知识库，跨 PostgreSQL、MinIO、Milvus 和本地 Chunk 明文快照。
 
 ```python
 async def delete_document(self, document_id):
@@ -192,8 +204,10 @@ async def delete_document(self, document_id):
     if document.status not in {READY, FAILED}:
         raise DocumentBusyError("文档正在后台处理，完成或失败后才能删除")
 
-    # 顺序：派生 → Asset/原文件 → 事实。PostgreSQL 最后删，让前两步失败时可追踪。
+    # 顺序：向量 → 本地明文快照 → Asset/原文件 → 事实。PostgreSQL 最后删除。
     await self._vector_store.delete_by_document(document_id)
+    await self._chunk_snapshot_store.delete_by_document(
+        document.knowledge_base_id, document.id)
     for asset in await self._repository.list_document_assets([document_id]):
         await self._storage.delete(asset.object_key)
     await self._storage.delete(document.object_key)
@@ -232,7 +246,9 @@ class ContextBuilder:
 
 ## 9. 为什么这一层不用 LangGraph
 
-处理流程是**确定性顺序工作流**（Parse→Chunk/Asset→Embed→Index，Retrieve→Generate）。用普通 Python Service 编排，代码从上到下就能读懂完整流程。只有未来出现条件路由、循环、Agent 决策等真实复杂度时，才考虑引入框架。
+处理流程是**确定性顺序工作流**（Parse→Chunk/Asset→Snapshot→Embed→Index，
+Retrieve→Generate）。用普通 Python Service 编排，代码从上到下就能读懂完整流程。只有未来
+出现条件路由、循环、Agent 决策等真实复杂度时，才考虑引入框架。
 
 ## 下一步
 

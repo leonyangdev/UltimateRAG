@@ -12,11 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from ultimate_rag.application import DocumentProcessingService, IngestionService
 from ultimate_rag.chunkers import StructureAwareChunker
 from ultimate_rag.config import Settings
-from ultimate_rag.domain.ports import Embedder, ObjectStorage, VectorStore
+from ultimate_rag.domain.ports import ChunkSnapshotStore, Embedder, ObjectStorage, VectorStore
 from ultimate_rag.embeddings import BailianEmbedder
 from ultimate_rag.infrastructure.database import create_database
 from ultimate_rag.infrastructure.database.repository import Repository
-from ultimate_rag.infrastructure.storage import MinioObjectStorage
+from ultimate_rag.infrastructure.storage import LocalChunkSnapshotStore, MinioObjectStorage
 from ultimate_rag.ocr import BailianOCRClient
 from ultimate_rag.parsers import (
     ExcelParser,
@@ -39,6 +39,7 @@ class ProcessingRuntime:
     engine: AsyncEngine
     repository: Repository
     storage: ObjectStorage
+    chunk_snapshot_store: ChunkSnapshotStore
     embedder: Embedder
     vector_store: VectorStore
     ingestion: IngestionService
@@ -134,6 +135,9 @@ def create_processing_runtime(settings: Settings) -> ProcessingRuntime:
         overlap_tokens=settings.chunk_overlap_tokens,
         tokenizer_name=settings.chunk_tokenizer,
     )
+    # 本地快照是明文诊断副本，不进入 PostgreSQL/Milvus。Docker Worker 通过 bind mount
+    # 把该路径映射回宿主机 data，直接运行 Worker 时则使用配置中的相对项目目录。
+    chunk_snapshot_store = LocalChunkSnapshotStore(settings.chunk_snapshot_dir)
     ingestion = IngestionService(
         repository=repository,
         storage=storage,
@@ -146,6 +150,7 @@ def create_processing_runtime(settings: Settings) -> ProcessingRuntime:
         storage=storage,
         parser_registry=registry,
         chunker=chunker,
+        chunk_snapshot_store=chunk_snapshot_store,
         embedder=embedder,
         vector_store=vector_store,
     )
@@ -153,6 +158,7 @@ def create_processing_runtime(settings: Settings) -> ProcessingRuntime:
         engine=engine,
         repository=repository,
         storage=storage,
+        chunk_snapshot_store=chunk_snapshot_store,
         embedder=embedder,
         vector_store=vector_store,
         ingestion=ingestion,

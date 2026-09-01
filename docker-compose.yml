@@ -130,7 +130,11 @@ services:
       VISION_MAX_OUTPUT_TOKENS: ${VISION_MAX_OUTPUT_TOKENS:-1536}
       PDF_SCAN_IMAGE_COVERAGE_THRESHOLD: ${PDF_SCAN_IMAGE_COVERAGE_THRESHOLD:-0.65}
       PDF_SCAN_VISION_TEXT_THRESHOLD: ${PDF_SCAN_VISION_TEXT_THRESHOLD:-300}
+      # API 删除文档时需要清理 Worker 生成的同一份明文快照。
+      CHUNK_SNAPSHOT_DIR: /app/data/chunk_snapshots
       CORS_ORIGINS: http://localhost:3000,http://192.168.3.19:3000
+    volumes:
+      - ./data/chunk_snapshots:/app/data/chunk_snapshots
     ports:
       - "8000:8000"
     depends_on:
@@ -177,8 +181,11 @@ services:
       VISION_MAX_OUTPUT_TOKENS: ${VISION_MAX_OUTPUT_TOKENS:-1536}
       PDF_SCAN_IMAGE_COVERAGE_THRESHOLD: ${PDF_SCAN_IMAGE_COVERAGE_THRESHOLD:-0.65}
       PDF_SCAN_VISION_TEXT_THRESHOLD: ${PDF_SCAN_VISION_TEXT_THRESHOLD:-300}
+      CHUNK_SNAPSHOT_DIR: /app/data/chunk_snapshots
     volumes:
       - docling_cache:/root/.cache
+      # Bind mount 让快照直接出现在宿主机 data，重建 Worker 容器后仍然保留。
+      - ./data/chunk_snapshots:/app/data/chunk_snapshots
     depends_on:
       api:
         condition: service_healthy

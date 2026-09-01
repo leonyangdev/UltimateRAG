@@ -50,7 +50,7 @@ Base URL：`http://localhost:8000`（前端默认解析为「当前主机名 + 8
 
 ### `DELETE /api/knowledge-bases/{knowledge_base_id}` → 204
 
-删除知识库及其文档、Chunk、任务、向量（跨三类存储同步清理）。
+删除知识库及其文档、Chunk、任务、向量和本地 Chunk 明文快照（跨存储同步清理）。
 
 ## 3. 文档
 

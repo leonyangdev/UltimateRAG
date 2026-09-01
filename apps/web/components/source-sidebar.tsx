@@ -47,20 +47,20 @@ export function SourceSidebar({ sourceNumber, citations, results, onClose }: Sou
         type="button"
         aria-label="关闭来源侧栏"
         onClick={onClose}
-        className="absolute inset-0 bg-black/25 backdrop-blur-[1px]"
+        className="absolute inset-0 bg-black/20 backdrop-blur-[1px] md:bg-transparent md:backdrop-blur-none"
       />
       <aside
         role="dialog"
         aria-modal="true"
         aria-label={`来源 ${sourceNumber}`}
-        className="absolute inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-border bg-background shadow-2xl"
+        className="absolute inset-y-0 right-0 flex w-full max-w-[34rem] flex-col border-l border-border bg-background shadow-2xl"
       >
-        <header className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-border px-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-sm font-semibold">
-              <BookOpen className="size-4 text-primary" /> 来源 {sourceNumber}
+              <BookOpen className="size-4" /> 来源 {sourceNumber}
             </div>
-            <p className="mt-1 truncate text-sm text-muted-foreground">
+            <p className="truncate text-xs text-muted-foreground">
               {citation?.filename ?? result?.filename ?? "来源不存在"}
             </p>
           </div>
@@ -69,7 +69,7 @@ export function SourceSidebar({ sourceNumber, citations, results, onClose }: Sou
           </Button>
         </header>
 
-        <div className="flex-1 space-y-5 overflow-y-auto p-5">
+        <div className="chat-scrollbar flex-1 space-y-5 overflow-y-auto bg-[#fafafa] p-4 sm:p-5 dark:bg-[#1d1d1d]">
           {!result ? (
             <p className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
               这条历史消息没有保存对应的检索快照，无法展示来源详情。
@@ -77,7 +77,7 @@ export function SourceSidebar({ sourceNumber, citations, results, onClose }: Sou
           ) : (
             <>
               <section className="space-y-2">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                <p className="text-xs font-medium text-muted-foreground">
                   原文位置
                 </p>
                 <p className="text-sm font-medium">
@@ -104,7 +104,7 @@ export function SourceSidebar({ sourceNumber, citations, results, onClose }: Sou
               </section>
 
               {result.assets.map((asset) => (
-                <figure key={asset.id} className="overflow-hidden rounded-xl border border-border bg-white">
+                <figure key={asset.id} className="overflow-hidden rounded-2xl border border-border bg-white">
                   <img
                     src={`${API_URL}${asset.content_url}`}
                     alt={asset.title}
@@ -122,7 +122,7 @@ export function SourceSidebar({ sourceNumber, citations, results, onClose }: Sou
                   href={`${API_URL}${result.preview_url}`}
                   target="_blank"
                   rel="noreferrer"
-                  className="block overflow-hidden rounded-xl border border-border bg-white"
+                  className="block overflow-hidden rounded-2xl border border-border bg-white"
                 >
                   <img
                     src={`${API_URL}${result.preview_url}`}
@@ -134,10 +134,10 @@ export function SourceSidebar({ sourceNumber, citations, results, onClose }: Sou
               )}
 
               <section>
-                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                <p className="mb-2 text-xs font-medium text-muted-foreground">
                   检索内容
                 </p>
-                <div className="prose-chat rounded-xl border border-border/70 bg-muted/30 p-4 text-sm leading-7">
+                <div className="prose-chat rounded-2xl border border-border bg-background p-4 text-sm leading-7">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>
                     {withoutAssetMarkers(result.matched_content ?? result.content)}
                   </ReactMarkdown>

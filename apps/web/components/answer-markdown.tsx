@@ -25,13 +25,13 @@ function AssetImage({ asset, alt }: AssetImageProps) {
   const [failed, setFailed] = useState(false);
   if (failed) {
     return (
-      <span className="my-3 block rounded-lg border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
+      <span className="my-3 block rounded-xl border border-dashed border-border px-4 py-3 text-sm text-muted-foreground">
         图片《{asset.title}》暂时加载失败，可点击相邻来源链接查看原文证据。
       </span>
     );
   }
   return (
-    <figure className="my-5 overflow-hidden rounded-xl border border-border/80 bg-white shadow-sm">
+    <figure className="my-5 overflow-hidden rounded-2xl border border-border bg-white">
       <img
         src={`${API_URL}${asset.content_url}`}
         alt={alt || asset.title}
@@ -39,7 +39,7 @@ function AssetImage({ asset, alt }: AssetImageProps) {
         onError={() => setFailed(true)}
         className="max-h-[36rem] w-full object-contain"
       />
-      <figcaption className="border-t border-border/70 bg-background px-3 py-2 text-xs text-muted-foreground">
+      <figcaption className="border-t border-border bg-background px-3.5 py-2.5 text-xs text-muted-foreground">
         {asset.title}
       </figcaption>
     </figure>
@@ -82,7 +82,7 @@ export function AnswerMarkdown({ content, results, onCitationClick }: AnswerMark
                 <button
                   type="button"
                   onClick={() => onCitationClick(sourceNumber)}
-                  className="mx-0.5 inline-flex items-center rounded-md bg-primary/10 px-1.5 py-0.5 text-xs font-semibold text-primary no-underline transition-colors hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                  className="mx-0.5 inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-xs font-semibold text-foreground no-underline transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                   aria-label={`打开来源 ${sourceNumber}`}
                 >
                   {children}

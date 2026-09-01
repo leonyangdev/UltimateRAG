@@ -1,6 +1,7 @@
-# 三大存储职责
+# 三大核心存储与本地 Chunk 快照
 
-这是 UltimateRAG 最重要、也最容易理解错的数据边界。**PostgreSQL、MinIO、Milvus 各自保存不同的东西，职责绝不混淆。**
+这是 UltimateRAG 最重要、也最容易理解错的数据边界。**PostgreSQL、MinIO、Milvus 各自保存
+不同的核心数据；本地 JSON 只提供可读诊断快照，不能升级成第四个事实来源。**
 
 ## 1. 一句话职责划分
 
@@ -9,6 +10,7 @@
 | **PostgreSQL** | 业务**事实**数据 | 事实来源（Source of Truth） |
 | **MinIO** | **原始文件 + 抽取图片 Asset** | 对象存储 |
 | **Milvus** | **Dense 向量与 BM25 稀疏索引** | 派生索引（Derived Index） |
+| **本地 JSON** | Embedding 前的最终 Chunk + metadata | 可重建诊断/审计副本 |
 
 ```text
 事实数据 + 原文件
@@ -74,7 +76,27 @@ embedding / sparse_embedding   Dense FloatVector 或 BM25 SparseFloatVector
 Dense 使用 `AUTOINDEX + COSINE`；Sparse 使用 `SPARSE_INVERTED_INDEX + BM25`。两者均使用
 `Strong` 一致性，保证 READY 后立即可检索、删除后立即不可见。
 
-## 5. 写路径与读路径
+## 5. 本地 JSON —— Embedding 前的可读快照
+
+Worker 在 Asset 已持久化、Chunk 已补齐 `filename/source_locator` 之后，先写：
+
+```text
+data/chunk_snapshots/{knowledge_base_id}/{document_id}/chunks.json
+```
+
+快照保存文档与 Parser 信息、`ParsedDocument.metadata`，以及每个 Chunk 的完整正文、标题路径、
+Token 数、Locator 和 metadata；不保存 Embedding。它使用 UTF-8、格式化 JSON 和同目录
+`os.replace` 原子覆盖。同一文档重试/重建不会追加无界历史，读者也不会看到半截文件。
+
+这份文件包含知识库明文，因此：
+
+- `/data/chunk_snapshots/` 被 Git 忽略；
+- Docker Compose 使用 bind mount，让 Worker 与 API 访问宿主机同一目录；
+- 文档或知识库删除时同步清理快照；
+- 快照写入失败会在 Embedding 前中止，并交给 Worker 有限重试；
+- 它不参与检索，也不能替代 PostgreSQL Chunk 事实。
+
+## 6. 写路径与读路径
 
 ### 写入时（Ingestion）
 
@@ -86,7 +108,11 @@ PostgreSQL 建 Document + Job（同一事务）
 Worker 处理：
    Parse → Chunk + 图片 Asset
    ↓
-MinIO 写 Asset；PostgreSQL 写 Asset/Chunk 事实（各自幂等）
+MinIO 写 Asset；本地原子保存最终 Chunk JSON
+   ↓
+百炼生成 Dense Embedding
+   ↓
+PostgreSQL 事务替换 Chunk 事实
    ↓
 Milvus 顺序写 Dense 与 Sparse（delete_by_document + upsert + flush）
    ↓
@@ -105,19 +131,22 @@ PostgreSQL 二次过滤（只留 READY 文档）
 拼上下文 → LLM → 答案
 ```
 
-## 6. 删除时的顺序（跨存储一致性）
+## 7. 删除时的顺序（跨存储一致性）
 
 删除文档/知识库时，按「**派生 → 原文件 → 事实**」的顺序：
 
 ```text
 1. 先删 Milvus 向量（派生索引）
-2. 再删 MinIO Asset 和原文件
-3. 最后删 PostgreSQL 事实
+2. 再删本地 Chunk 明文快照
+3. 再删 MinIO Asset 和原文件
+4. 最后删 PostgreSQL 事实
 ```
 
-为什么最后删 PostgreSQL？因为前两步失败时，PostgreSQL 事实记录仍然存在，运维可以根据它知道**还要清理哪些外部资源**。这是「明确失败状态 + 补偿操作」思想的体现，V3 不做跨存储事务。
+为什么最后删 PostgreSQL？因为任一前置清理步骤失败时，PostgreSQL 事实记录仍然存在，运维可以
+根据它知道**还要清理哪些外部资源**。这是「明确失败状态 + 补偿操作」思想的体现，V3 不做
+跨存储事务。
 
-## 7. 为什么不让 Milvus 当事实来源
+## 8. 为什么不让 Milvus 当事实来源
 
 如果只把业务状态存在 Milvus，会面临：
 
@@ -127,7 +156,7 @@ PostgreSQL 二次过滤（只留 READY 文档）
 
 因此：**业务事实放 PostgreSQL，派生索引放 Milvus。**
 
-## 8. 一张图总结
+## 9. 一张图总结
 
 ```text
 ┌─────────────────────────────┐
@@ -141,6 +170,9 @@ PostgreSQL 二次过滤（只留 READY 文档）
 │  事实：文档/Chunk/Asset/会话   │                       │    Milvus    │
 │  （业务状态 + 文本）          │ ◄────────────────── │  向量索引     │
 └─────────────────────────────┘   重新向量化        └──────────────┘
+            │
+            └── Embedding 前导出 ──► data/chunk_snapshots/*.json
+                                      （可读诊断副本）
 ```
 
 ## 下一步

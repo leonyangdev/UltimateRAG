@@ -16,6 +16,7 @@
 |---|---|
 | 限制上传文件大小 | `MAX_UPLOAD_BYTES`（默认 10MB） |
 | 调整 Chunk 大小 | `CHUNK_MAX_TOKENS`（512）、`CHUNK_OVERLAP_TOKENS`（64） |
+| 修改 Embedding 前 Chunk 快照目录 | `CHUNK_SNAPSHOT_DIR`（`data/chunk_snapshots`） |
 | 换问答模型 | `LLM_MODEL`（qwen-plus） |
 | 换 Embedding 模型 | `EMBEDDING_MODEL`（text-embedding-v4）、`EMBEDDING_DIMENSION`（1024） |
 | 换 Query Rewrite / Rerank 模型 | `QUERY_REWRITE_MODEL`（qwen-plus）、`RERANK_MODEL`（qwen3-rerank） |
@@ -43,6 +44,7 @@
 | `MINIO_ENDPOINT` / `MINIO_BUCKET` | `localhost:9000` / `documents` |
 | `MILVUS_URI` / `MILVUS_COLLECTION` | `http://localhost:19530` / `knowledge_chunks`（Dense） |
 | `MILVUS_SPARSE_COLLECTION` | `knowledge_chunks_sparse_v3` |
+| `CHUNK_SNAPSHOT_DIR` | `data/chunk_snapshots`（Docker 内为 `/app/data/chunk_snapshots`） |
 | `RERANK_URL` | `https://dashscope.aliyuncs.com/compatible-api/v1/reranks` |
 | `DASHSCOPE_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 
@@ -67,9 +69,12 @@
 DASHSCOPE_BASE_URL=https://你的百炼工作空间地址/compatible-mode/v1
 DASHSCOPE_API_KEY=你的API-Key
 
+CHUNK_SNAPSHOT_DIR=data/chunk_snapshots
+
 NEXT_PUBLIC_API_URL=
 ```
 
 ::: warning
-`.env` 与真实密钥禁止提交到 Git。生产部署必须覆盖默认凭据与 `DOCLING_DEVICE`。
+`.env` 与真实密钥禁止提交到 Git。Chunk 快照包含文档明文，默认目录也已被 Git 忽略；生产部署
+必须设置访问权限、容量监控，并覆盖默认凭据与 `DOCLING_DEVICE`。
 :::

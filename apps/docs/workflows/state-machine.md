@@ -26,7 +26,7 @@ PENDING → PARSING → CHUNKING → EMBEDDING → INDEXING → READY
 
 ### 核心规则
 
-1. **READY 是提交标志**：只有 Parse → Chunk/Asset → Embed → Index 全部成功后才设置
+1. **READY 是提交标志**：只有 Parse → Chunk/Asset → Snapshot → Embed → Index 全部成功后才设置；Snapshot 属于 `CHUNKING` 内部步骤
 2. **状态先于动作**：每个阶段开始前先更新状态。进程中断时，数据库停留在「最后开始的阶段」，便于定位
 3. **绝不让未完成文档可用**：未 READY 的文档不参与检索（检索层用 `READY` 过滤）
 4. **失败保留可理解状态**：`FAILED` + `error_message` 供用户排查

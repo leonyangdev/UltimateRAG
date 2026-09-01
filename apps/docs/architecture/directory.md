@@ -13,7 +13,7 @@ UltimateRAG/
 ├── docs/                        # 产品 / 架构 / ADR 文档（源文档）
 ├── scripts/                     # 可重复执行的发布验收脚本
 ├── tests/                       # 单元测试与固定文档
-├── data/                        # 本地调试用样例文件
+├── data/                        # 本地样例 + Git 忽略的 chunk_snapshots/ 诊断输出
 ├── pyproject.toml               # Python 依赖与工具配置（uv）
 ├── uv.lock                      # 锁文件
 ├── docker-compose.yml           # 一键启动全部服务
@@ -69,7 +69,8 @@ src/ultimate_rag/
 │   │   ├── models.py        #     表结构：knowledge_bases/documents/chunks/ingestion_jobs
 │   │   └── repository.py    #     面向业务语义的数据访问
 │   └── storage/
-│       └── minio.py         #   MinIO 对象存储适配器
+│       ├── minio.py            #   MinIO 对象存储适配器
+│       └── chunk_snapshot.py   #   Embedding 前 UTF-8 JSON 原子快照
 │
 ├── parsers/                 # 解析器（格式 → 统一模型）
 │   ├── registry.py          #   ParserRegistry：按来源选择 Parser
@@ -148,6 +149,7 @@ tests/
 | 「解析 Markdown」 | `parsers/markdown.py` |
 | 「解析 PDF（含扫描页）」 | `parsers/pdf.py` |
 | 「切块策略」 | `chunkers/markdown.py` |
+| 「查看切块后的本地 JSON」 | `data/chunk_snapshots/{kb_id}/{document_id}/chunks.json` |
 | 「向量化」 | `embeddings/bailian.py` |
 | 「写/查向量库」 | `vectorstores/milvus.py` |
 | 「组装答案」 | `application/services.py` → `RAGService` |
