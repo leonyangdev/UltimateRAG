@@ -1,7 +1,7 @@
 # 构建 VitePress 文档站点并发布到 GitHub Pages。
 #
 # 触发条件：
-# - push 到 V2 分支且涉及 apps/docs/ 下文件变化
+# - push 到 main 分支且涉及 apps/docs/ 下文件变化
 # - 手动 workflow_dispatch（兜底，可在任意分支构建当前内容）
 #
 # 站点地址：https://leonyangdev.github.io/UltimateRAG/
