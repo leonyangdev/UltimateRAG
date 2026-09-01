@@ -9,7 +9,7 @@ name: Deploy Docs to GitHub Pages
 
 on:
   push:
-    branches: [V2]
+    branches: [main]
     paths: ['apps/docs/**']
   workflow_dispatch:
 
