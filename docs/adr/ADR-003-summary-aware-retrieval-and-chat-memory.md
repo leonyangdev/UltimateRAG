@@ -42,7 +42,11 @@ Trace 新增 `intent` 和 `strategy`，避免把结构覆盖的顺序分数误�
 
 ### 2. 会话原文是事实，摘要是缓存
 
-新增 `chat_sessions` 与 `chat_messages`：每次进入知识库创建新会话，用户可以选择历史会话继续。
+新增 `chat_sessions` 与 `chat_messages`，但页面导航本身不应成为业务事实。进入知识库或点击
+“新建对话”只进入浏览器中的未持久化 Draft；已经处于 Draft 时重复点击保持幂等。用户首次发送
+Chat 问题前才创建 `chat_sessions` 记录，并在后续请求中复用返回的 `session_id`。因此历史列表只
+承载真正开始过问答的会话，不会因为页面进入或重复点击积累空记录；用户仍可选择历史会话继续。
+
 所有原始消息保留在 PostgreSQL；`memory_summary` 和 `memory_through_sequence` 只记录可重建的递归
 摘要。模型输入由“长期摘要 + 最近消息原文”组成，最近消息按本地 Tokenizer 预算倒序保留。
 
@@ -66,6 +70,7 @@ Trace 新增 `intent` 和 `strategy`，避免把结构覆盖的顺序分数误�
 ## Consequences / 影响
 
 - “总结文档”可以稳定覆盖摘要、方法、实验与结论，且 References 不再挤占核心预算。
+- 未发送消息的 Draft 只存在于浏览器；删除最后一条历史会话时也回到 Draft，不写入替代空记录。
 - 历史会话跨刷新、跨进程存在，后续问题可用会话消解指代。
 - 新增 Alembic `0003_chat_sessions`，部署前必须执行迁移。
 - 长会话偶尔产生一次额外百炼摘要调用；通过阈值、最大输出和失败降级控制成本。

@@ -302,7 +302,8 @@ class ChatRequest(RetrievalRequest):
     """RAG 问答请求；外部字段使用更符合产品语义的 ``question``。"""
 
     query: str = Field(min_length=1, max_length=4000, alias="question")
-    # 保持旧客户端无 session_id 时的无状态行为；新版页面始终显式传入持久化会话。
+    # 保持旧客户端无 session_id 时的无状态行为；新版页面会在 Draft 首次发送前按需创建会话，
+    # 再把返回的 UUID 显式传入，后续轮次因此可以复用服务端上下文。
     session_id: str | None = Field(default=None, min_length=36, max_length=36)
     model_config = ConfigDict(populate_by_name=True)
 
