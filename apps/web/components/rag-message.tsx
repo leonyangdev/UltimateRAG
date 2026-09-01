@@ -83,6 +83,7 @@ export function RAGMessage({ message }: RAGMessageProps) {
               <AnswerMarkdown
                 content={text}
                 results={results}
+                sourceCount={citations.length}
                 onCitationClick={setSelectedSource}
               />
             </div>
@@ -101,7 +102,14 @@ export function RAGMessage({ message }: RAGMessageProps) {
             )}
           </>
         )}
-        {!isUser && <RetrievalEvidence citations={citations} results={results} trace={trace} />}
+        {!isUser && (
+          <RetrievalEvidence
+            citations={citations}
+            results={results}
+            trace={trace}
+            onSourceClick={setSelectedSource}
+          />
+        )}
       </div>
       {!isUser && (
         <SourceSidebar

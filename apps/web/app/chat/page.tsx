@@ -13,7 +13,6 @@ import {
   FileText,
   LoaderCircle,
   Menu,
-  PanelLeftOpen,
   Plus,
   Search,
   SlidersHorizontal,
@@ -79,6 +78,7 @@ export default function ChatPage() {
   const [activeSession, setActiveSession] = useState<ChatSession | null>(null);
   const [initialSessionMessages, setInitialSessionMessages] = useState<RAGMessageType[]>([]);
   const [isLoadingSession, setIsLoadingSession] = useState(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   // 记录 documents 当前归属的知识库。「已选择但尚未加载完成」由二者差异推导，
   // 避免在 effect 体内同步 setState（React 新规范不推荐，会触发级联渲染）。
@@ -232,7 +232,7 @@ export default function ChatPage() {
    * 检索结果和错误提示，并在流式进行中时中止旧请求，避免 token 写入已废弃的会话。
    */
   function selectKnowledgeBase(id: string) {
-    if (id === selectedId) return;
+    if (id === selectedId || deletingSessionId) return;
     if (isChatWorking) stop();
     initializedKnowledgeBaseRef.current = null;
     setSelectedId(id);
@@ -286,6 +286,82 @@ export default function ChatPage() {
       setPageError(value instanceof Error ? value.message : "历史会话加载失败");
     } finally {
       setIsLoadingSession(false);
+    }
+  }
+
+  /**
+   * 删除一条知识库会话，并在删除当前会话后恢复一个可继续输入的目标。
+   *
+   * DELETE 使用知识库父资源路径，前后端共同约束会话归属。删除非当前会话只更新左侧列表；
+   * 删除当前会话时优先打开剩余最近会话，没有历史时创建一个新会话，保证 Composer 不会停在
+   * 已删除的 session_id。后端会对正在生成的 PENDING 回答返回 409，因此这里不做乐观删除。
+   */
+  async function deleteSession(sessionId: string) {
+    if (!selectedId || deletingSessionId) return;
+    if (sessionId === activeSession?.id && isChatWorking) {
+      const error = new Error("回答生成完成后才能删除当前会话");
+      setPageError(error.message);
+      throw error;
+    }
+
+    const knowledgeBaseId = selectedId;
+    setDeletingSessionId(sessionId);
+    try {
+      // 只有服务端确认 204 后才从本地列表移除，409/404 时保留原 UI 便于用户重试或核验。
+      await api<void>(
+        `/api/knowledge-bases/${knowledgeBaseId}/chat-sessions/${sessionId}`,
+        { method: "DELETE" },
+      );
+    } catch (value) {
+      setPageError(value instanceof Error ? value.message : "会话删除失败");
+      setDeletingSessionId(null);
+      throw value;
+    }
+
+    const remainingSessions = sessions.filter((session) => session.id !== sessionId);
+    setSessions(remainingSessions);
+    if (sessionId !== activeSession?.id) {
+      setPageError("");
+      setDeletingSessionId(null);
+      return;
+    }
+
+    // 当前消息和证据都绑定旧 session_id，先清空再恢复下一会话，避免短暂显示已删除内容。
+    setActiveSession(null);
+    setInitialSessionMessages([]);
+    setRetrievalResults([]);
+    setRetrievalTrace(null);
+
+    try {
+      if (remainingSessions.length > 0) {
+        const detail = await api<ChatSessionDetail>(
+          `/api/chat-sessions/${remainingSessions[0].id}`,
+        );
+        if (detail.session.knowledge_base_id !== knowledgeBaseId) {
+          throw new Error("下一个历史会话不属于当前知识库");
+        }
+        setActiveSession(detail.session);
+        setInitialSessionMessages(toRAGMessages(detail.messages));
+      } else {
+        // 每个知识库始终保留一个可输入的空会话；这是删除最后一条会话后的明确产品状态。
+        const created = await api<ChatSession>(
+          `/api/knowledge-bases/${knowledgeBaseId}/chat-sessions`,
+          { method: "POST" },
+        );
+        setSessions([created]);
+        setActiveSession(created);
+        setInitialSessionMessages([]);
+      }
+      setPageError("");
+    } catch (value) {
+      // 会话本身已经成功删除，后续恢复失败不能伪装成“删除失败”；保留空状态并说明真实阶段。
+      setPageError(
+        value instanceof Error
+          ? `会话已删除，但无法打开下一会话：${value.message}`
+          : "会话已删除，但无法打开下一会话",
+      );
+    } finally {
+      setDeletingSessionId(null);
     }
   }
 
@@ -394,12 +470,16 @@ export default function ChatPage() {
         documentCount={documents.length}
         readyCount={readyCount}
         isLoadingSession={isLoadingSession}
+        isChatWorking={isChatWorking}
+        deletingSessionId={deletingSessionId}
         isMobileOpen={isMobileSidebarOpen}
         isDesktopCollapsed={isDesktopSidebarCollapsed}
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
         onCollapseDesktop={() => setIsDesktopSidebarCollapsed(true)}
+        onExpandDesktop={() => setIsDesktopSidebarCollapsed(false)}
         onCreateSession={() => void createNewSession()}
         onOpenSession={(sessionId) => void openHistorySession(sessionId)}
+        onDeleteSession={deleteSession}
       />
 
       <section className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -416,26 +496,14 @@ export default function ChatPage() {
             >
               <Menu />
             </Button>
-            {isDesktopSidebarCollapsed && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => setIsDesktopSidebarCollapsed(false)}
-                aria-label="展开会话侧栏"
-                className="hidden md:inline-flex"
-              >
-                <PanelLeftOpen />
-              </Button>
-            )}
-
             {knowledgeBases.length > 0 ? (
               <div className="group relative min-w-0">
                 <select
                   value={selectedId ?? ""}
                   onChange={(event) => selectKnowledgeBase(event.target.value)}
+                  disabled={deletingSessionId !== null}
                   aria-label="选择问答知识库"
-                  className="h-10 max-w-[58vw] appearance-none truncate rounded-lg border-0 bg-transparent py-1 pl-2 pr-7 text-base font-semibold outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40 sm:max-w-sm"
+                  className="h-10 max-w-[58vw] appearance-none truncate rounded-lg border-0 bg-transparent py-1 pl-2 pr-7 text-base font-semibold outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60 sm:max-w-sm"
                 >
                   {knowledgeBases.map((base) => (
                     <option key={base.id} value={base.id}>

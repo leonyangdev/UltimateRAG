@@ -31,11 +31,16 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  overlayClassName,
   ...props
-}: DialogPrimitive.DialogContentProps & { showCloseButton?: boolean }) {
+}: DialogPrimitive.DialogContentProps & {
+  showCloseButton?: boolean;
+  /** 允许侧栏等非居中形态调整遮罩视觉；焦点管理仍由同一 Radix Dialog 负责。 */
+  overlayClassName?: string;
+}) {
   return (
     <DialogPortal>
-      <DialogOverlay />
+      <DialogOverlay className={overlayClassName} />
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(

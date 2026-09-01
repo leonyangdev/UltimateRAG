@@ -168,6 +168,31 @@ class ChatService:
         self._memory = memory
         self._stale_after_seconds = stale_after_seconds
 
+    async def delete_session(self, knowledge_base_id: str, session_id: str) -> None:
+        """在与生成恢复相同的过期规则下删除一条聊天会话。
+
+        删除由 ChatService 转发而不是 Route 直接调用 Repository，是因为是否允许删除取决于
+        当前部署的生成失活窗口。复用 ``stale_after_seconds`` 能保证开始新轮次和删除会话
+        对有效 PENDING 消息的判断一致。
+
+        Args:
+            knowledge_base_id: 会话所属知识库 ID，用于限制删除范围。
+            session_id: 要删除的聊天会话 ID。
+
+        Raises:
+            ResourceNotFoundError: 知识库或其范围内的会话不存在。
+            ChatSessionBusyError: 会话仍在生成有效回答。
+
+        Side Effects:
+            删除 PostgreSQL 中的会话和全部关联消息；不会影响知识库文档或向量索引。
+        """
+
+        await self._repository.delete_chat_session(
+            knowledge_base_id,
+            session_id,
+            stale_after_seconds=self._stale_after_seconds,
+        )
+
     async def answer(
         self,
         *,

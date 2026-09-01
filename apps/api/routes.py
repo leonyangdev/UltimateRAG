@@ -202,6 +202,36 @@ async def get_chat_session(session_id: str, request: Request) -> ChatSessionDeta
     )
 
 
+@router.delete(
+    "/knowledge-bases/{knowledge_base_id}/chat-sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_chat_session(
+    knowledge_base_id: str,
+    session_id: str,
+    request: Request,
+) -> Response:
+    """删除当前知识库的一条历史会话及其全部消息。
+
+    路由保留知识库父资源路径，使客户端不能仅凭会话 ID 发起无范围删除。Repository 会在
+    同一事务中再次校验会话归属；会话不存在或属于其他知识库时由统一异常处理器返回 404。
+
+    Args:
+        knowledge_base_id: 会话所属知识库 ID。
+        session_id: 要删除的会话 ID。
+        request: 用于读取进程级 Repository 的 FastAPI 请求。
+
+    Returns:
+        不含响应体的 204 响应。
+
+    Side Effects:
+        删除 PostgreSQL 中的会话及通过关系级联关联的全部聊天消息。
+    """
+
+    await container(request).chat.delete_session(knowledge_base_id, session_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/documents/{document_id}", response_model=DocumentResponse)
 async def get_document(document_id: str, request: Request) -> DocumentResponse:
     """读取一份文档的处理元数据。"""

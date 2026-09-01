@@ -263,6 +263,7 @@ x-vercel-ai-ui-message-stream: v1     # AI SDK 识别标记
 | `POST` | `/api/knowledge-bases/{id}/chat-sessions` | 创建空白新会话 |
 | `GET` | `/api/knowledge-bases/{id}/chat-sessions` | 按最近活动列出历史会话 |
 | `GET` | `/api/chat-sessions/{session_id}` | 返回会话、完整消息和助手消息的 Retrieval Evidence |
+| `DELETE` | `/api/knowledge-bases/{id}/chat-sessions/{session_id}` | 删除会话及全部消息，成功返回 204 |
 
 新版 `/api/chat` 与 `/api/chat/stream` 可传 `session_id`。后端会验证会话属于请求中的知识库；
 不传时保留旧版无状态行为。全文总结的 `retrieval_trace` 还会返回：
@@ -277,13 +278,18 @@ x-vercel-ai-ui-message-stream: v1     # AI SDK 识别标记
 正常完成的助手消息会在 `retrieval_evidence` 中保存当时的 `citations`、`retrieval_results` 和
 `retrieval_trace`。这是展示历史来源的快照，不会在读取会话时重新调用 Milvus 或 LLM。
 
+删除会话时同时校验父知识库和会话归属；知识库/会话不存在或跨知识库访问返回 404。Repository
+会先锁定会话并检查助手 PENDING 占位，有效生成尚未完成时返回 409；超过部署失活窗口的占位
+不会永久阻塞删除。父会话与全部 `chat_messages` 在同一 PostgreSQL 事务中级联删除，不影响知识库
+文档、Chunk 或向量索引。
+
 ## 6. HTTP 状态码与业务异常映射
 
 | 状态码 | 业务异常 | 场景 |
 |---|---|---|
 | `400` | `InvalidDocumentError` | 文件超限、格式不支持、空文档、参数不合法 |
-| `404` | `ResourceNotFoundError` | 知识库/文档不存在 |
-| `409` | `DocumentBusyError` | 文档正在后台处理，完成或失败后才能删除 |
+| `404` | `ResourceNotFoundError` | 知识库/文档/会话不存在，或会话不属于路径中的知识库 |
+| `409` | `DocumentBusyError` / `ChatSessionBusyError` | 文档正在处理，或会话仍在生成回答 |
 | `502` | `UltimateRAGError`（其他已知） | 外部处理故障；不暴露 Stack Trace |
 | `500` | 未预期异常 | 兜底（FastAPI 默认） |
 

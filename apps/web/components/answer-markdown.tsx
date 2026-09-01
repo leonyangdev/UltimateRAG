@@ -12,6 +12,7 @@ import { API_URL, type DocumentAsset, type RetrievalResult } from "@/app/lib";
 interface AnswerMarkdownProps {
   content: string;
   results: RetrievalResult[];
+  sourceCount: number;
   onCitationClick: (sourceNumber: number) => void;
 }
 
@@ -53,17 +54,26 @@ function AssetImage({ asset, alt }: AssetImageProps) {
  * 消息的 RetrievalResult 明确声明该 ID 时才会转成 API 图片。模型或恶意文档即使输出任意
  * Asset ID/外链图片，也无法绕过这份后端证据白名单触发对象读取或第三方跟踪请求。
  */
-export function AnswerMarkdown({ content, results, onCitationClick }: AnswerMarkdownProps) {
+export function AnswerMarkdown({
+  content,
+  results,
+  sourceCount,
+  onCitationClick,
+}: AnswerMarkdownProps) {
   const assets = useMemo(
     () => new Map(results.flatMap((result) => result.assets).map((asset) => [asset.id, asset])),
     [results],
   );
 
-  // 兼容升级前已经保存的“[来源 N]”纯文本答案。新 Prompt 会直接产生 citation:// 链接；
-  // 负向检查避免把已经是 Markdown 链接的来源再次包装。
+  // 兼容升级前已经保存的纯文本引用。历史模型可能把多个来源合并写成
+  // ``[来源 1, 2]``、``[来源 1，来源 2]`` 或中文顿号形式，因此先提取其中每个编号，
+  // 再拆成独立链接；负向检查避免把已经是 Markdown 链接的引用再次包装。
   const normalized = content.replace(
-    /\[来源\s+(\d+)\](?!\s*\()/g,
-    (_match, sourceNumber: string) => `[来源 ${sourceNumber}](citation://${sourceNumber})`,
+    /\[来源\s*(\d+(?:\s*[,，、]\s*(?:来源\s*)?\d+)*)\](?!\s*\()/g,
+    (_match, sourceNumbers: string) =>
+      (sourceNumbers.match(/\d+/g) ?? [])
+        .map((sourceNumber) => `[来源 ${sourceNumber}](citation://${sourceNumber})`)
+        .join("、"),
   );
 
   return (
@@ -76,19 +86,29 @@ export function AnswerMarkdown({ content, results, onCitationClick }: AnswerMark
       components={{
         a({ href, children }) {
           if (href?.startsWith("citation://")) {
-            const sourceNumber = Number.parseInt(href.slice("citation://".length), 10);
-            if (Number.isInteger(sourceNumber) && sourceNumber > 0) {
+            const citationMatch = /^citation:\/\/(\d+)$/.exec(href);
+            const sourceNumber = citationMatch ? Number.parseInt(citationMatch[1], 10) : 0;
+            // Citation 编号只能落在后端随本消息返回的证据快照内。模型生成的越界编号
+            // 仍显示为普通文本，但不能借 ``results[N - 1]`` 猜测并打开另一条证据。
+            if (
+              Number.isInteger(sourceNumber) &&
+              sourceNumber > 0 &&
+              sourceNumber <= sourceCount
+            ) {
               return (
                 <button
                   type="button"
                   onClick={() => onCitationClick(sourceNumber)}
-                  className="mx-0.5 inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-xs font-semibold text-foreground no-underline transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                  className="mx-0.5 inline-flex translate-y-[-0.08em] items-center rounded-md bg-muted px-1.5 py-0.5 text-[0.78em] font-semibold leading-5 text-foreground no-underline transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                   aria-label={`打开来源 ${sourceNumber}`}
+                  aria-haspopup="dialog"
+                  title={`查看来源 ${sourceNumber}`}
                 >
                   {children}
                 </button>
               );
             }
+            return <span className="text-muted-foreground">{children}</span>;
           }
           return (
             <a href={href} target="_blank" rel="noreferrer">

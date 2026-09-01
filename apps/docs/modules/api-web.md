@@ -102,6 +102,18 @@ POST   /api/chat/stream                          → SSE 流式问答（AI SDK U
 GET    /api/health                               → 存活检查（不触发模型调用）
 ```
 
+**持久化会话**
+
+```text
+POST   /api/knowledge-bases/{kb_id}/chat-sessions                → 创建空白会话
+GET    /api/knowledge-bases/{kb_id}/chat-sessions                → 当前知识库历史列表
+GET    /api/chat-sessions/{session_id}                           → 会话正文 + 当轮证据快照
+DELETE /api/knowledge-bases/{kb_id}/chat-sessions/{session_id}   → 204 级联删除会话消息
+```
+
+删除端点保留知识库父资源路径，并在事务内锁定会话、校验归属。有效的 PENDING 生成会返回 409，
+避免流式回答结束时向已删除会话提交消息；会话不存在或跨知识库访问统一返回 404。
+
 ### 6. 上传端点的关键设计
 
 ```python
@@ -168,10 +180,10 @@ react-markdown + remark-gfm — 渲染答案 Markdown
 
 | 页面 | 功能 |
 |---|---|
-| `/` | 首页入口 |
+| `/` | 重定向到统一聊天工作区 |
 | `/knowledge-bases` | 知识库列表、创建 |
 | `/knowledge-bases/[id]` | 知识库详情：上传、状态轮询、重新解析、删除 |
-| `/chat` | 聊天界面：流式问答 + 证据展示 |
+| `/chat` | ChatGPT 风格聊天：会话导航、流式问答、可点击来源与证据侧栏 |
 
 ### 11. API 调用封装（`app/lib.ts`）
 
@@ -233,7 +245,23 @@ export type RAGMessage = UIMessage<unknown, RAGDataParts>;
 模型输出的任意公网图片不会自动加载，避免恶意知识通过像素请求跟踪浏览器。MinIO Object Key、
 Access Key 和 Secret 从不进入 API Schema 或模型 Prompt。
 
-### 15. 文档状态轮询
+### 15. 会话导航、删除与来源侧栏
+
+桌面左侧导航有两个稳定宽度：展开时为 260px，会显示历史会话；折叠时仍保留 64px 图标轨，
+提供“展开侧栏 / 新建会话 / 管理知识库”三个入口。移动端不复用桌面折叠宽度，而是使用完整
+260px 遮罩抽屉，避免在窄屏中只留下难以理解的图标列表。
+
+会话行把“打开”和“删除”实现为两个同级按钮，并使用确认 Dialog。删除非当前会话只更新列表；
+删除当前会话后优先恢复最近历史，没有剩余会话时立即创建空会话，确保后续请求不会继续携带
+已经删除的 `session_id`。前端只在服务端返回 204 后更新本地列表，404/409 不做乐观删除。
+
+答案中的 `[来源 N](citation://N)` 不是 HTTP URL。`AnswerMarkdown` 只允许 N 落在当前消息
+Citation 快照范围内，再把点击交给右侧来源 Dialog。组合历史格式（如 `[来源 1, 2]`）会拆成
+两个独立链接；越界编号只显示文本。侧栏随后按 Citation 的 `chunk_id` 精确关联
+RetrievalResult，不使用数组下标猜测证据。Radix Dialog 提供 Escape、焦点陷阱和关闭后的焦点
+恢复；桌面遮罩透明，移动端保留遮罩以维持清晰层级。
+
+### 16. 文档状态轮询
 
 前端轮询 `GET /knowledge-bases/{id}/documents` 获取实时处理状态（PENDING → … → READY/FAILED），把后台 Worker 的进度展示给用户。
 
