@@ -10,7 +10,6 @@ name: Deploy Docs to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: ['apps/docs/**']
   workflow_dispatch:
 
 # 发布到 Pages 需要 id-token 与 pages 写权限；GitHub Actions 是 Pages 的唯一构建源。
