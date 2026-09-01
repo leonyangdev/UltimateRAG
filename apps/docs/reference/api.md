@@ -260,10 +260,14 @@ x-vercel-ai-ui-message-stream: v1     # AI SDK 识别标记
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `POST` | `/api/knowledge-bases/{id}/chat-sessions` | 创建空白新会话 |
+| `POST` | `/api/knowledge-bases/{id}/chat-sessions` | 持久化新会话；网页端仅在 Draft 首次 Chat 发送前调用 |
 | `GET` | `/api/knowledge-bases/{id}/chat-sessions` | 按最近活动列出历史会话 |
 | `GET` | `/api/chat-sessions/{session_id}` | 返回会话、完整消息和助手消息的 Retrieval Evidence |
 | `DELETE` | `/api/knowledge-bases/{id}/chat-sessions/{session_id}` | 删除会话及全部消息，成功返回 204 |
+
+网页中的 Draft 没有服务端资源，也没有对应 API：进入知识库、点击“新建对话”以及在 Draft 中重复
+点击都不会写数据库。首次提交 Chat 问题时，客户端先调用会话 POST，随后把响应中的 `id` 作为
+`session_id` 传给 `/api/chat` 或 `/api/chat/stream`；删除最后一条历史会话后重新回到 Draft。
 
 新版 `/api/chat` 与 `/api/chat/stream` 可传 `session_id`。后端会验证会话属于请求中的知识库；
 不传时保留旧版无状态行为。全文总结的 `retrieval_trace` 还会返回：

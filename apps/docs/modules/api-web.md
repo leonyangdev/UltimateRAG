@@ -105,10 +105,24 @@ GET    /api/health                               → 存活检查（不触发模
 **持久化会话**
 
 ```text
-POST   /api/knowledge-bases/{kb_id}/chat-sessions                → 创建空白会话
+POST   /api/knowledge-bases/{kb_id}/chat-sessions                → Draft 首次 Chat 发送前按需持久化会话
 GET    /api/knowledge-bases/{kb_id}/chat-sessions                → 当前知识库历史列表
 GET    /api/chat-sessions/{session_id}                           → 会话正文 + 当轮证据快照
 DELETE /api/knowledge-bases/{kb_id}/chat-sessions/{session_id}   → 204 级联删除会话消息
+```
+
+页面中的“新对话”不是一条数据库记录，而是没有 `session_id` 的本地 Draft。进入知识库或从历史会话
+点击“新建对话”只清空当前对话视图；已经处于 Draft 时重复点击是幂等操作，不发送写请求。只有首次
+提交 Chat 问题时，前端才先创建持久化会话，再把返回的 ID 传给流式问答：
+
+```text
+进入知识库 / 点击“新建对话”
+        ↓ 浏览器 Draft，不调用 POST
+首次提交 Chat 问题
+        ↓ POST /api/knowledge-bases/{kb_id}/chat-sessions
+获得 session_id
+        ↓ POST /api/chat/stream（携带 session_id）
+会话进入历史列表，后续轮次复用同一 session_id
 ```
 
 删除端点保留知识库父资源路径，并在事务内锁定会话、校验归属。有效的 PENDING 生成会返回 409，
@@ -251,9 +265,13 @@ Access Key 和 Secret 从不进入 API Schema 或模型 Prompt。
 提供“展开侧栏 / 新建会话 / 管理知识库”三个入口。移动端不复用桌面折叠宽度，而是使用完整
 260px 遮罩抽屉，避免在窄屏中只留下难以理解的图标列表。
 
+新建入口切换到不含 `session_id` 的 Draft；如果当前已经是 Draft，重复点击不重置状态、不创建记录。
+Draft 与 AI SDK 的视图身份独立于数据库 ID，首次发送完成持久化时不会因为 ID 从空值变成 UUID
+而重建 Chat 实例或丢失正在流式合并的消息。
+
 会话行把“打开”和“删除”实现为两个同级按钮，并使用确认 Dialog。删除非当前会话只更新列表；
-删除当前会话后优先恢复最近历史，没有剩余会话时立即创建空会话，确保后续请求不会继续携带
-已经删除的 `session_id`。前端只在服务端返回 204 后更新本地列表，404/409 不做乐观删除。
+删除当前会话后优先恢复最近历史，没有剩余会话时回到 Draft，确保后续请求不会继续携带已经删除的
+`session_id`，同时不写入替代空会话。前端只在服务端返回 204 后更新本地列表，404/409 不做乐观删除。
 
 答案中的 `[来源 N](citation://N)` 不是 HTTP URL。`AnswerMarkdown` 只允许 N 落在当前消息
 Citation 快照范围内，再把点击交给右侧来源 Dialog。组合历史格式（如 `[来源 1, 2]`）会拆成

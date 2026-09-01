@@ -1,7 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  KeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import {
@@ -56,8 +64,10 @@ type Mode = "chat" | "retrieval";
  *   「当前知识库是否有可检索内容」，不提供修改入口。
  *
  * 关键行为：
- *   - useChat 的会话 id 绑定选中的知识库。AI SDK 在 id 变化时会重建会话，
- *     因此切换知识库后消息自动清空，不会把上一个知识库的对话带到新范围。
+ *   - “新聊天”首先是浏览器中的未持久化草稿；只有用户第一次发送消息时才创建数据库会话，
+ *     因此进入页面或反复点击新建不会在历史列表制造空记录。
+ *   - useChat 使用独立的视图 ID，而不是直接绑定数据库 session_id。草稿首次持久化时保持
+ *     同一个 Chat 实例，避免刚加入的用户消息因 session_id 从 null 变为 UUID 而被清空。
  *   - RAG 请求体携带 knowledge_base_id，后端按该范围检索，与服务端的知识库
  *     隔离约束保持单一事实来源（URL 不参与范围决定）。
  *
@@ -67,9 +77,10 @@ type Mode = "chat" | "retrieval";
  *   不再长期占用聊天首屏。移动端把左侧栏转换为带遮罩的抽屉，消息流仍拥有唯一滚动容器。
  *
  * 交互约束：
- *   切换知识库会中止旧流并创建该知识库的新会话；选择历史会话则从 PostgreSQL 恢复完整
- *   上下文和 Retrieval 快照。Composer 使用 Enter 发送、Shift+Enter 换行并在 200px 内自动
- *   增高，保证长问题可编辑但不会挤掉整个回答区域。
+ *   切换知识库会中止旧流并进入该知识库的新草稿；选择历史会话则从 PostgreSQL 恢复完整
+ *   上下文和 Retrieval 快照。删除最后一个历史会话也回到草稿态，不创建替代空记录。
+ *   Composer 使用 Enter 发送、Shift+Enter 换行并在 200px 内自动增高，保证长问题可编辑但
+ *   不会挤掉整个回答区域。
  */
 export default function ChatPage() {
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
@@ -77,7 +88,13 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSession, setActiveSession] = useState<ChatSession | null>(null);
   const [initialSessionMessages, setInitialSessionMessages] = useState<RAGMessageType[]>([]);
-  const [isLoadingSession, setIsLoadingSession] = useState(false);
+  // Chat View ID 只表达“当前屏幕是哪一次对话视图”，不等同于 PostgreSQL session_id。
+  // 草稿首次发送后数据库 ID 会出现，但视图 ID 保持不变，AI SDK 因此不会重建并丢失流式消息。
+  const [chatViewId, setChatViewId] = useState("chat-view-initial");
+  const [isSessionOperationPending, setIsSessionOperationPending] = useState(false);
+  // 与文档加载相同，历史列表加载态由「当前选择」和「已经完成加载的归属」推导，避免在
+  // Effect 入口同步 setState 触发 React 级联渲染；打开历史、首次创建则使用独立操作态。
+  const [sessionsLoadedForId, setSessionsLoadedForId] = useState<string | null>(null);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   // 记录 documents 当前归属的知识库。「已选择但尚未加载完成」由二者差异推导，
@@ -100,8 +117,11 @@ export default function ChatPage() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  // React 开发模式会重复执行 Effect。记录已经初始化的知识库，避免一次进入产生两个空会话。
-  const initializedKnowledgeBaseRef = useRef<string | null>(null);
+  const chatViewSequenceRef = useRef(0);
+  const chatViewKnowledgeBaseRef = useRef<string | null>(null);
+  // React State 在下一次渲染前不会立即生效。同步 Ref 专门封住双击发送、连续 Enter 等
+  // 同一事件循环内的重复提交，确保一个 Draft 最多发起一次会话创建请求。
+  const isCreatingSessionRef = useRef(false);
 
   // Transport 只创建一次。每次提问的 question 放进 sendMessage options，避免闭包保存旧输入，
   // 也让 AI SDK 继续负责取消、请求状态机和 Message Part 的增量合并。
@@ -110,8 +130,8 @@ export default function ChatPage() {
     [],
   );
 
-  // 会话 id 绑定知识库：AI SDK 检测到 id 变化会重建 Chat 实例，
-  // 这是「切换知识库即清空对话」的实现基础，而不是手动维护消息数组。
+  // 只有进入另一个草稿或打开历史会话时才改变 chatViewId。首次发送创建数据库会话时
+  // activeSession 会从 null 变为 UUID，但该 ID 不参与 useChat 重建条件。
   const {
     messages,
     sendMessage,
@@ -119,7 +139,7 @@ export default function ChatPage() {
     error: chatError,
     stop,
   } = useChat<RAGMessageType>({
-    id: activeSession?.id ?? "new-chat-pending",
+    id: chatViewId,
     messages: initialSessionMessages,
     transport,
   });
@@ -131,6 +151,28 @@ export default function ChatPage() {
   const selectedKnowledgeBase = knowledgeBases.find((base) => base.id === selectedId) ?? null;
   // 选中了知识库但文档列表还不属于它，说明正在加载；未选中时无需加载。
   const isLoadingDocuments = selectedId !== null && loadedForId !== selectedId;
+  const isLoadingSessionHistory =
+    selectedId !== null && sessionsLoadedForId !== selectedId;
+  const isLoadingSession = isSessionOperationPending || isLoadingSessionHistory;
+
+  /**
+   * 进入一个新的未持久化聊天视图。
+   *
+   * 该动作只修改浏览器状态，不调用会话 POST。``chatViewId`` 的递增会让 AI SDK 创建干净的
+   * Chat 实例；知识库 ID 进入标识仅用于调试可读性，不作为后端会话事实。
+   */
+  const enterDraftChat = useCallback((knowledgeBaseId: string) => {
+    chatViewSequenceRef.current += 1;
+    chatViewKnowledgeBaseRef.current = knowledgeBaseId;
+    setChatViewId(`draft:${knowledgeBaseId}:${chatViewSequenceRef.current}`);
+    setActiveSession(null);
+    setInitialSessionMessages([]);
+    setQuestion("");
+    setRetrievalResults([]);
+    setRetrievalTrace(null);
+    setPageError("");
+    if (composerRef.current) composerRef.current.style.height = "auto";
+  }, []);
 
   useEffect(() => {
     let isActive = true;
@@ -191,33 +233,29 @@ export default function ChatPage() {
   }, [selectedId]);
 
   useEffect(() => {
-    if (!selectedId || initializedKnowledgeBaseRef.current === selectedId) return;
-    initializedKnowledgeBaseRef.current = selectedId;
+    if (!selectedId) return;
     let isActive = true;
-    setIsLoadingSession(true);
 
-    // 每次进入知识库都创建一个新会话，同时加载历史列表。两项互不依赖，并发执行可减少等待。
-    void Promise.all([
-      api<ChatSession[]>(`/api/knowledge-bases/${selectedId}/chat-sessions`),
-      api<ChatSession>(`/api/knowledge-bases/${selectedId}/chat-sessions`, { method: "POST" }),
-    ])
-      .then(([history, created]) => {
+    // 进入知识库只加载已有历史，并在本地展示新聊天草稿。GET 在 React Strict Mode 下
+    // 即使重复执行也没有副作用；不再用 Ref 抑制第二次 Effect，避免第一次请求被 cleanup
+    // 标记失效后没有任何请求可以提交结果。
+    if (chatViewKnowledgeBaseRef.current !== selectedId) enterDraftChat(selectedId);
+    void api<ChatSession[]>(`/api/knowledge-bases/${selectedId}/chat-sessions`)
+      .then((history) => {
         if (!isActive) return;
-        setSessions([created, ...history.filter((session) => session.id !== created.id)]);
-        setActiveSession(created);
-        setInitialSessionMessages([]);
+        setSessions(history);
       })
       .catch((value: unknown) => {
-        if (isActive) setPageError(value instanceof Error ? value.message : "会话创建失败");
+        if (isActive) setPageError(value instanceof Error ? value.message : "历史会话加载失败");
       })
       .finally(() => {
-        if (isActive) setIsLoadingSession(false);
+        if (isActive) setSessionsLoadedForId(selectedId);
       });
 
     return () => {
       isActive = false;
     };
-  }, [selectedId]);
+  }, [enterDraftChat, selectedId]);
 
   useEffect(() => {
     // 流式阶段每次 Message Part 增长后跟随到底部，让新 token 始终保持可见。
@@ -228,51 +266,40 @@ export default function ChatPage() {
 
   /**
    * 切换问答目标知识库。
-   * 消息清空由 useChat 的会话 id 变化自动完成；这里负责清空与旧知识库绑定的
+   * 消息清空由 chatViewId 变化自动完成；这里负责清空与旧知识库绑定的
    * 检索结果和错误提示，并在流式进行中时中止旧请求，避免 token 写入已废弃的会话。
    */
   function selectKnowledgeBase(id: string) {
-    if (id === selectedId || deletingSessionId) return;
+    if (id === selectedId || deletingSessionId || isLoadingSession) return;
     if (isChatWorking) stop();
-    initializedKnowledgeBaseRef.current = null;
     setSelectedId(id);
-    setActiveSession(null);
     setSessions([]);
-    setInitialSessionMessages([]);
-    setRetrievalResults([]);
-    setRetrievalTrace(null);
     setSelectedDocumentIds([]);
-    setPageError("");
     setIsSettingsOpen(false);
+    enterDraftChat(id);
   }
 
-  /** 显式开始新会话；空会话也持久化，刷新后仍可从历史列表看到。 */
-  async function createNewSession() {
+  /**
+   * 进入 ChatGPT 式新聊天草稿，不创建数据库记录。
+   *
+   * 已经位于空草稿时重复点击是幂等操作，只关闭移动抽屉并聚焦输入框；从历史会话进入时才
+   * 递增 Chat View ID 清空消息。真正的 ChatSession 由首次发送路径按需创建。
+   */
+  function startNewChat() {
     if (!selectedId || isLoadingSession) return;
     if (isChatWorking) stop();
-    setIsLoadingSession(true);
-    try {
-      const created = await api<ChatSession>(
-        `/api/knowledge-bases/${selectedId}/chat-sessions`,
-        { method: "POST" },
-      );
-      setSessions((current) => [created, ...current.filter((item) => item.id !== created.id)]);
-      setActiveSession(created);
-      setInitialSessionMessages([]);
-      setPageError("");
-      setIsMobileSidebarOpen(false);
-    } catch (value) {
-      setPageError(value instanceof Error ? value.message : "新建会话失败");
-    } finally {
-      setIsLoadingSession(false);
+    if (activeSession !== null || messages.length > 0) {
+      enterDraftChat(selectedId);
     }
+    setIsMobileSidebarOpen(false);
+    requestAnimationFrame(() => composerRef.current?.focus());
   }
 
   /** 选择历史会话并从 PostgreSQL 恢复消息，而不是依赖浏览器临时状态。 */
   async function openHistorySession(sessionId: string) {
     if (!sessionId || sessionId === activeSession?.id) return;
     if (isChatWorking) stop();
-    setIsLoadingSession(true);
+    setIsSessionOperationPending(true);
     try {
       const detail = await api<ChatSessionDetail>(`/api/chat-sessions/${sessionId}`);
       if (detail.session.knowledge_base_id !== selectedId) {
@@ -280,12 +307,15 @@ export default function ChatPage() {
       }
       setActiveSession(detail.session);
       setInitialSessionMessages(toRAGMessages(detail.messages));
+      chatViewSequenceRef.current += 1;
+      chatViewKnowledgeBaseRef.current = detail.session.knowledge_base_id;
+      setChatViewId(`session:${sessionId}:${chatViewSequenceRef.current}`);
       setPageError("");
       setIsMobileSidebarOpen(false);
     } catch (value) {
       setPageError(value instanceof Error ? value.message : "历史会话加载失败");
     } finally {
-      setIsLoadingSession(false);
+      setIsSessionOperationPending(false);
     }
   }
 
@@ -293,8 +323,9 @@ export default function ChatPage() {
    * 删除一条知识库会话，并在删除当前会话后恢复一个可继续输入的目标。
    *
    * DELETE 使用知识库父资源路径，前后端共同约束会话归属。删除非当前会话只更新左侧列表；
-   * 删除当前会话时优先打开剩余最近会话，没有历史时创建一个新会话，保证 Composer 不会停在
-   * 已删除的 session_id。后端会对正在生成的 PENDING 回答返回 409，因此这里不做乐观删除。
+   * 删除当前会话时优先打开剩余最近会话，没有历史时回到未持久化 Draft，保证 Composer 不会
+   * 停在已删除的 session_id，也不会为了占位再次制造空记录。后端会对正在生成的 PENDING
+   * 回答返回 409，因此这里不做乐观删除。
    */
   async function deleteSession(sessionId: string) {
     if (!selectedId || deletingSessionId) return;
@@ -326,11 +357,9 @@ export default function ChatPage() {
       return;
     }
 
-    // 当前消息和证据都绑定旧 session_id，先清空再恢复下一会话，避免短暂显示已删除内容。
-    setActiveSession(null);
-    setInitialSessionMessages([]);
-    setRetrievalResults([]);
-    setRetrievalTrace(null);
+    // 当前消息和证据都绑定旧 session_id。先切到安全的本地 Draft，让 AI SDK 立即销毁旧
+    // Chat 实例；若后续历史详情加载失败，用户仍可直接重新提问，而不会看到已删除内容。
+    enterDraftChat(knowledgeBaseId);
 
     try {
       if (remainingSessions.length > 0) {
@@ -342,19 +371,13 @@ export default function ChatPage() {
         }
         setActiveSession(detail.session);
         setInitialSessionMessages(toRAGMessages(detail.messages));
-      } else {
-        // 每个知识库始终保留一个可输入的空会话；这是删除最后一条会话后的明确产品状态。
-        const created = await api<ChatSession>(
-          `/api/knowledge-bases/${knowledgeBaseId}/chat-sessions`,
-          { method: "POST" },
-        );
-        setSessions([created]);
-        setActiveSession(created);
-        setInitialSessionMessages([]);
+        chatViewSequenceRef.current += 1;
+        chatViewKnowledgeBaseRef.current = knowledgeBaseId;
+        setChatViewId(`session:${detail.session.id}:${chatViewSequenceRef.current}`);
       }
       setPageError("");
     } catch (value) {
-      // 会话本身已经成功删除，后续恢复失败不能伪装成“删除失败”；保留空状态并说明真实阶段。
+      // 会话本身已经成功删除，后续恢复失败不能伪装成“删除失败”；保留 Draft 并说明真实阶段。
       setPageError(
         value instanceof Error
           ? `会话已删除，但无法打开下一会话：${value.message}`
@@ -365,21 +388,48 @@ export default function ChatPage() {
     }
   }
 
-  async function refreshSessions(knowledgeBaseId: string) {
+  /**
+   * 刷新一个知识库的历史列表，并按显式 ID 更新仍处于活动状态的会话摘要。
+   *
+   * 首次发送的函数闭包中 activeSession 仍为 null，因此不能从闭包推断刷新目标。显式传入
+   * 本轮创建/使用的 session_id，既能拿到后端生成的新标题，也避免旧流结束后覆盖用户后来
+   * 打开的另一会话。若用户已经切换知识库，本次旧响应直接丢弃。
+   */
+  async function refreshSessions(knowledgeBaseId: string, activeSessionId: string) {
     const values = await api<ChatSession[]>(
       `/api/knowledge-bases/${knowledgeBaseId}/chat-sessions`,
     );
+    if (chatViewKnowledgeBaseRef.current !== knowledgeBaseId) return;
     setSessions(values);
-    const current = values.find((session) => session.id === activeSession?.id);
-    if (current) setActiveSession(current);
+    setActiveSession((current) => {
+      if (current?.id !== activeSessionId) return current;
+      return values.find((session) => session.id === activeSessionId) ?? current;
+    });
   }
 
-  /** 根据当前模式发送真实流式问答，或执行不依赖 LLM 的检索调试。 */
+  /**
+   * 根据当前模式发送真实流式问答，或执行不依赖 LLM 的检索调试。
+   *
+   * Chat 模式在 Draft 首次提交时先持久化会话，再把返回的 session_id 放入流式请求；创建
+   * 成功后不会改变 chatViewId，因此当前 AI SDK Chat 实例可以继续接收本轮增量消息。
+   * Retrieval 模式只调用检索解释接口，始终不创建 ChatSession。
+   */
   async function submitQuestion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const normalizedQuestion = question.trim();
-    if (!normalizedQuestion || !selectedId || !activeSession || !hasReadyDocument) return;
+    if (
+      !normalizedQuestion ||
+      !selectedId ||
+      !hasReadyDocument ||
+      isChatWorking ||
+      isRetrieving ||
+      isLoadingSession ||
+      isCreatingSessionRef.current
+    ) {
+      return;
+    }
     setPageError("");
+    const knowledgeBaseId = selectedId;
     const retrievalOptions = {
       mode: retrievalMode,
       candidate_k: 30,
@@ -390,6 +440,34 @@ export default function ChatPage() {
     };
 
     if (mode === "chat") {
+      let targetSession = activeSession;
+
+      // Draft 不是业务事实；只有用户真正提交第一条消息时才创建 PostgreSQL 会话。
+      // 同步 Ref 比 isLoadingSession 更早生效，用于防止快速双 Enter 产生两条空会话。
+      if (!targetSession) {
+        isCreatingSessionRef.current = true;
+        setIsSessionOperationPending(true);
+        try {
+          const created = await api<ChatSession>(
+            `/api/knowledge-bases/${knowledgeBaseId}/chat-sessions`,
+            { method: "POST" },
+          );
+          targetSession = created;
+          setActiveSession(created);
+          setSessions((current) => [
+            created,
+            ...current.filter((session) => session.id !== created.id),
+          ]);
+        } catch (value) {
+          // 创建失败时保留输入内容和 Draft，用户可在外部服务恢复后直接重试。
+          setPageError(value instanceof Error ? value.message : "会话创建失败");
+          return;
+        } finally {
+          isCreatingSessionRef.current = false;
+          setIsSessionOperationPending(false);
+        }
+      }
+
       setQuestion("");
       // 提交后立即把手动扩高的输入框恢复为单行，给回答留出更多可视空间。
       if (composerRef.current) composerRef.current.style.height = "auto";
@@ -398,15 +476,15 @@ export default function ChatPage() {
           { text: normalizedQuestion },
           {
             body: {
-              knowledge_base_id: selectedId,
-              session_id: activeSession.id,
+              knowledge_base_id: knowledgeBaseId,
+              session_id: targetSession.id,
               question: normalizedQuestion,
               top_k: 5,
               ...retrievalOptions,
             },
           },
         );
-        await refreshSessions(selectedId);
+        await refreshSessions(knowledgeBaseId, targetSession.id);
       } catch (value) {
         setPageError(value instanceof Error ? value.message : "问答请求失败");
       }
@@ -420,7 +498,7 @@ export default function ChatPage() {
       const response = await api<RetrievalExplainResponse>("/api/retrieval/explain", {
         method: "POST",
         body: JSON.stringify({
-          knowledge_base_id: selectedId,
+          knowledge_base_id: knowledgeBaseId,
           query: normalizedQuestion,
           top_k: 5,
           ...retrievalOptions,
@@ -477,7 +555,7 @@ export default function ChatPage() {
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
         onCollapseDesktop={() => setIsDesktopSidebarCollapsed(true)}
         onExpandDesktop={() => setIsDesktopSidebarCollapsed(false)}
-        onCreateSession={() => void createNewSession()}
+        onCreateSession={startNewChat}
         onOpenSession={(sessionId) => void openHistorySession(sessionId)}
         onDeleteSession={deleteSession}
       />
@@ -501,7 +579,7 @@ export default function ChatPage() {
                 <select
                   value={selectedId ?? ""}
                   onChange={(event) => selectKnowledgeBase(event.target.value)}
-                  disabled={deletingSessionId !== null}
+                  disabled={deletingSessionId !== null || isLoadingSession}
                   aria-label="选择问答知识库"
                   className="h-10 max-w-[58vw] appearance-none truncate rounded-lg border-0 bg-transparent py-1 pl-2 pr-7 text-base font-semibold outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60 sm:max-w-sm"
                 >
@@ -794,7 +872,7 @@ export default function ChatPage() {
                           ? "给 UltimateRAG 发消息"
                           : "输入查询以调试检索"
                 }
-                disabled={!selectedId || !activeSession || !hasReadyDocument || isLoadingSession}
+                disabled={!selectedId || !hasReadyDocument || isLoadingSession}
                 className="min-h-11 max-h-[200px] resize-none overflow-y-auto border-0 bg-transparent px-3 py-2.5 text-[15px] leading-6 shadow-none focus-visible:ring-0"
               />
 
@@ -844,7 +922,6 @@ export default function ChatPage() {
                     disabled={
                       !question.trim() ||
                       !selectedId ||
-                      !activeSession ||
                       !hasReadyDocument ||
                       isRetrieving ||
                       isLoadingSession

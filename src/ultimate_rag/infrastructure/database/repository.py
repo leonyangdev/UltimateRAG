@@ -81,7 +81,7 @@ class Repository:
             return self._knowledge_base(model)
 
     async def create_chat_session(self, knowledge_base_id: str) -> ChatSession:
-        """为知识库创建一个空白会话；首次问题会确定可读标题。"""
+        """为知识库创建空白持久化会话；调用时机由应用层控制，首次问题会确定标题。"""
 
         model = ChatSessionModel(id=str(uuid4()), knowledge_base_id=knowledge_base_id)
         async with self._session_factory() as session, session.begin():

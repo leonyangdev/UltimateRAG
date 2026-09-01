@@ -169,7 +169,7 @@ async def create_chat_session(
     knowledge_base_id: str,
     request: Request,
 ) -> ChatSessionResponse:
-    """进入知识库问答时创建一个独立空会话。"""
+    """在网页端 Draft 首次发送问题前，按需创建一个持久化会话。"""
 
     value = await container(request).repository.create_chat_session(knowledge_base_id)
     return ChatSessionResponse.from_domain(value)
