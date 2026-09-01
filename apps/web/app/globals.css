@@ -4,30 +4,55 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --radius: 0.75rem;
-  --background: oklch(0.982 0.006 85);
-  --foreground: oklch(0.205 0.018 255);
-  --card: oklch(0.998 0.002 85);
-  --card-foreground: oklch(0.205 0.018 255);
+  --radius: 0.875rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.17 0.004 285);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.17 0.004 285);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.205 0.018 255);
-  --primary: oklch(0.52 0.145 55);
-  --primary-foreground: oklch(0.985 0.005 85);
-  --secondary: oklch(0.95 0.012 80);
-  --secondary-foreground: oklch(0.28 0.025 255);
-  --muted: oklch(0.955 0.008 85);
-  --muted-foreground: oklch(0.51 0.02 255);
-  --accent: oklch(0.94 0.025 70);
-  --accent-foreground: oklch(0.32 0.06 55);
+  --popover-foreground: oklch(0.17 0.004 285);
+  --primary: oklch(0.17 0.004 285);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.965 0.002 285);
+  --secondary-foreground: oklch(0.22 0.004 285);
+  --muted: oklch(0.975 0.002 285);
+  --muted-foreground: oklch(0.48 0.008 285);
+  --accent: oklch(0.94 0.004 285);
+  --accent-foreground: oklch(0.2 0.004 285);
   --destructive: oklch(0.58 0.21 25);
-  --border: oklch(0.89 0.012 80);
-  --input: oklch(0.87 0.014 80);
-  --ring: oklch(0.58 0.14 60);
-  --chart-1: oklch(0.58 0.15 55);
+  --border: oklch(0.91 0.003 285);
+  --input: oklch(0.88 0.004 285);
+  --ring: oklch(0.47 0.01 285);
+  --chart-1: oklch(0.45 0.11 155);
   --chart-2: oklch(0.55 0.1 185);
   --chart-3: oklch(0.46 0.08 245);
   --chart-4: oklch(0.72 0.14 95);
   --chart-5: oklch(0.62 0.17 30);
+}
+
+/*
+ * 深色令牌与浅色主题保持相同的中性层级。当前界面暂未暴露主题开关，但系统或未来设置
+ * 加上 .dark 后不应退回旧的暖色品牌色，也不能让来源卡片和输入框失去层次。
+ */
+.dark {
+  --background: oklch(0.17 0.004 285);
+  --foreground: oklch(0.96 0.002 285);
+  --card: oklch(0.205 0.004 285);
+  --card-foreground: oklch(0.96 0.002 285);
+  --popover: oklch(0.205 0.004 285);
+  --popover-foreground: oklch(0.96 0.002 285);
+  --primary: oklch(0.96 0.002 285);
+  --primary-foreground: oklch(0.19 0.004 285);
+  --secondary: oklch(0.255 0.005 285);
+  --secondary-foreground: oklch(0.95 0.002 285);
+  --muted: oklch(0.24 0.004 285);
+  --muted-foreground: oklch(0.69 0.006 285);
+  --accent: oklch(0.29 0.006 285);
+  --accent-foreground: oklch(0.96 0.002 285);
+  --destructive: oklch(0.65 0.19 25);
+  --border: oklch(0.31 0.005 285);
+  --input: oklch(0.35 0.006 285);
+  --ring: oklch(0.7 0.006 285);
 }
 
 @theme inline {
@@ -61,6 +86,23 @@
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
   --radius-2xl: calc(var(--radius) + 8px);
+}
+
+/* ChatGPT 式细滚动条仅用于应用内部滚动区，键盘和触控滚动行为保持浏览器原生语义。 */
+.chat-scrollbar {
+  scrollbar-color: oklch(0.82 0.004 285) transparent;
+  scrollbar-width: thin;
+}
+
+.chat-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat-scrollbar::-webkit-scrollbar-thumb {
+  background: oklch(0.82 0.004 285);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
 }
 
 @layer base {
@@ -128,8 +170,8 @@
 
   /* 行内代码 */
   :not(pre) > code {
-    background: oklch(0.94 0.008 85);
-    border: 1px solid oklch(0.89 0.012 80);
+    background: oklch(0.95 0.002 285);
+    border: 1px solid oklch(0.9 0.003 285);
     border-radius: 0.25em;
     padding: 0.15em 0.35em;
     font-size: 0.875em;
@@ -159,11 +201,11 @@
 
   /* 引用块 */
   blockquote {
-    border-left: 3px solid oklch(0.52 0.145 55);
+    border-left: 3px solid oklch(0.45 0.008 285);
     padding-left: 1em;
     margin-top: 0.75em;
     margin-bottom: 0.75em;
-    color: oklch(0.45 0.02 255);
+    color: oklch(0.43 0.008 285);
     font-style: italic;
   }
 
@@ -176,32 +218,32 @@
     margin-bottom: 0.75em;
   }
   th, td {
-    border: 1px solid oklch(0.89 0.012 80);
+    border: 1px solid oklch(0.9 0.003 285);
     padding: 0.5em 0.75em;
     text-align: left;
   }
   th {
-    background: oklch(0.96 0.006 85);
+    background: oklch(0.96 0.002 285);
     font-weight: 600;
   }
   tr:nth-child(even) td {
-    background: oklch(0.985 0.003 85);
+    background: oklch(0.985 0.001 285);
   }
 
   /* 分割线 */
   hr {
     border: none;
-    border-top: 1px solid oklch(0.89 0.012 80);
+    border-top: 1px solid oklch(0.9 0.003 285);
     margin: 1em 0;
   }
 
   /* 链接 */
   a {
-    color: oklch(0.52 0.145 55);
+    color: oklch(0.31 0.08 250);
     text-decoration: underline;
     text-underline-offset: 2px;
   }
   a:hover {
-    color: oklch(0.45 0.14 55);
+    color: oklch(0.22 0.07 250);
   }
 }

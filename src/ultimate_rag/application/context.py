@@ -50,10 +50,21 @@ class ContextBuilder:
             # 避免空标签让模型和用户误以为来源元数据在格式化时丢失。
             locator = result.locator.display() if result.locator else ""
             heading = locator or " > ".join(result.heading_path) or "未提供原文定位"
+            resource_lines = [
+                (f"- 图片《{asset.title}》：![{asset.title}](asset://{asset.id})")
+                for asset in result.assets
+            ]
+            resources = (
+                "\n可展示资源（需要回答图片时原样复制对应 Markdown，不要改写 ID）：\n"
+                + "\n".join(resource_lines)
+                if resource_lines
+                else ""
+            )
             section = (
                 f"[来源 {index}]\n"
                 f"文档：{result.filename}\n"
                 f"位置：{heading}\n"
+                f"{resources}"
                 f"内容：\n{result.content}"
             )
 

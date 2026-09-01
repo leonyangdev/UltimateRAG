@@ -1,4 +1,4 @@
-"""UltimateRAG V2 HTTP 路由。
+"""UltimateRAG V3 HTTP 路由。
 
 模块职责：
     验证 HTTP 输入、调用应用服务，并把领域结果映射为普通 JSON 或 AI SDK UI Message Stream。
@@ -28,14 +28,19 @@ from fastapi.responses import StreamingResponse
 
 from api.container import Container
 from api.schemas import (
+    ChatMessageResponse,
     ChatRequest,
     ChatResponse,
+    ChatSessionDetailResponse,
+    ChatSessionResponse,
     CitationResponse,
     DocumentResponse,
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
+    RetrievalExplainResponse,
     RetrievalRequest,
     RetrievalResultResponse,
+    RetrievalTraceResponse,
 )
 from ultimate_rag.domain.exceptions import InvalidDocumentError
 
@@ -155,11 +160,138 @@ async def list_documents(knowledge_base_id: str, request: Request) -> list[Docum
     return [DocumentResponse.from_domain(value) for value in values]
 
 
+@router.post(
+    "/knowledge-bases/{knowledge_base_id}/chat-sessions",
+    response_model=ChatSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_chat_session(
+    knowledge_base_id: str,
+    request: Request,
+) -> ChatSessionResponse:
+    """进入知识库问答时创建一个独立空会话。"""
+
+    value = await container(request).repository.create_chat_session(knowledge_base_id)
+    return ChatSessionResponse.from_domain(value)
+
+
+@router.get(
+    "/knowledge-bases/{knowledge_base_id}/chat-sessions",
+    response_model=list[ChatSessionResponse],
+)
+async def list_chat_sessions(
+    knowledge_base_id: str,
+    request: Request,
+) -> list[ChatSessionResponse]:
+    """列出当前知识库可继续的历史会话。"""
+
+    values = await container(request).repository.list_chat_sessions(knowledge_base_id)
+    return [ChatSessionResponse.from_domain(value) for value in values]
+
+
+@router.get("/chat-sessions/{session_id}", response_model=ChatSessionDetailResponse)
+async def get_chat_session(session_id: str, request: Request) -> ChatSessionDetailResponse:
+    """恢复一条历史会话及其完整消息事实。"""
+
+    dependencies = container(request)
+    value = await dependencies.repository.get_chat_session(session_id)
+    messages = await dependencies.repository.list_chat_messages(session_id)
+    return ChatSessionDetailResponse(
+        session=ChatSessionResponse.from_domain(value),
+        messages=[ChatMessageResponse.from_domain(message) for message in messages],
+    )
+
+
 @router.get("/documents/{document_id}", response_model=DocumentResponse)
 async def get_document(document_id: str, request: Request) -> DocumentResponse:
     """读取一份文档的处理元数据。"""
     value = await container(request).repository.get_document(document_id)
     return DocumentResponse.from_domain(value)
+
+
+@router.post(
+    "/documents/{document_id}/reindex",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def reindex_document(document_id: str, request: Request) -> DocumentResponse:
+    """使用已有 MinIO 原文件重新提交解析、Asset 抽取和索引任务。"""
+
+    value = await container(request).ingestion.reindex(document_id)
+    return DocumentResponse.from_domain(value)
+
+
+@router.get("/chunks/{chunk_id}/preview")
+async def preview_chunk(chunk_id: str, request: Request) -> Response:
+    """从 MinIO 原 PDF 按可信页码/BBox 返回命中区域。
+
+    Args:
+        chunk_id: RetrievalResult 中公开的稳定命中 ID；接口不接受页码、BBox 或倍率参数。
+        request: 用于取得进程级依赖，并读取标准 ``If-None-Match`` 请求头。
+
+    Returns:
+        首次请求返回带安全响应头的 JPEG；缓存仍有效时返回不含响应体的 304。
+
+    Raises:
+        ResourceNotFoundError: Chunk 不存在或不是可预览的 READY PDF 片段。
+        UltimateRAGError: MinIO 读取或本地 PDF 渲染失败。
+
+    Side Effects:
+        只读访问 PostgreSQL/MinIO 并可能执行本地栅格化；不会调用 OCR/Vision 或写入存储。
+    """
+
+    # Application Service 已完成资源与定位校验。Route 只处理 HTTP 条件缓存和媒体响应，
+    # 不直接访问 Repository、MinIO 或 PDFium，保持 Controller 边界轻量。
+    preview = await container(request).visual_evidence.preview_chunk(chunk_id)
+    if request.headers.get("if-none-match") == f'"{preview.etag}"':
+        return Response(
+            status_code=status.HTTP_304_NOT_MODIFIED,
+            headers={"ETag": f'"{preview.etag}"'},
+        )
+    return Response(
+        content=preview.content,
+        media_type=preview.media_type,
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "ETag": f'"{preview.etag}"',
+            "Content-Disposition": "inline",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/assets/{asset_id}/content")
+async def get_asset_content(asset_id: str, request: Request) -> Response:
+    """返回摄取期已抽取并登记的图片 Asset。
+
+    Args:
+        asset_id: 模型 ``asset://`` 标记和 RetrievalResult 共同引用的稳定资源 ID。
+        request: 用于取得应用服务并处理标准条件缓存请求头。
+
+    Returns:
+        READY 文档的原始抽取图片；ETag 命中时返回不含响应体的 304。
+
+    Side Effects:
+        只读访问 PostgreSQL 和 MinIO，不重新运行 PDF Parser、OCR 或 Vision。
+    """
+
+    asset = await container(request).visual_evidence.read_asset(asset_id)
+    quoted_etag = f'"{asset.etag}"'
+    if request.headers.get("if-none-match") == quoted_etag:
+        return Response(
+            status_code=status.HTTP_304_NOT_MODIFIED,
+            headers={"ETag": quoted_etag},
+        )
+    return Response(
+        content=asset.content,
+        media_type=asset.media_type,
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "ETag": quoted_etag,
+            "Content-Disposition": f'inline; filename="{asset.filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -171,25 +303,64 @@ async def delete_document(document_id: str, request: Request) -> Response:
 
 @router.post("/retrieval/search", response_model=list[RetrievalResultResponse])
 async def search(payload: RetrievalRequest, request: Request) -> list[RetrievalResultResponse]:
-    """执行不依赖 LLM 的 Dense Retrieval，供效果调试和独立测试。"""
+    """执行 V3 Retrieval，并保留 V1/V2 的结果数组响应形状。"""
     await container(request).repository.get_knowledge_base(payload.knowledge_base_id)
     results = await container(request).retrieval.search(
-        payload.knowledge_base_id, payload.query, payload.top_k
+        payload.knowledge_base_id,
+        payload.query,
+        payload.top_k,
+        payload.to_options(container(request).retrieval_defaults),
     )
     return [RetrievalResultResponse.from_domain(result) for result in results]
+
+
+@router.post("/retrieval/explain", response_model=RetrievalExplainResponse)
+async def explain_retrieval(
+    payload: RetrievalRequest,
+    request: Request,
+) -> RetrievalExplainResponse:
+    """返回高级检索结果及 Query Rewrite、融合、重排和扩展执行情况。"""
+
+    dependencies = container(request)
+    await dependencies.repository.get_knowledge_base(payload.knowledge_base_id)
+    run = await dependencies.retrieval.retrieve(
+        payload.knowledge_base_id,
+        payload.query,
+        payload.top_k,
+        payload.to_options(dependencies.retrieval_defaults),
+    )
+    return RetrievalExplainResponse(
+        results=[RetrievalResultResponse.from_domain(result) for result in run.results],
+        trace=RetrievalTraceResponse.from_domain(run.trace),
+    )
 
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
     """执行完整 RAG 问答并返回答案、引用与召回证据。"""
     await container(request).repository.get_knowledge_base(payload.knowledge_base_id)
-    answer, citations, results = await container(request).rag.answer(
-        payload.knowledge_base_id, payload.query, payload.top_k
-    )
+    dependencies = container(request)
+    options = payload.to_options(dependencies.retrieval_defaults)
+    if payload.session_id:
+        answer, citations, results, trace = await dependencies.chat.answer(
+            session_id=payload.session_id,
+            knowledge_base_id=payload.knowledge_base_id,
+            question=payload.query,
+            top_k=payload.top_k,
+            options=options,
+        )
+    else:
+        answer, citations, results, trace = await dependencies.rag.answer_with_trace(
+            payload.knowledge_base_id,
+            payload.query,
+            payload.top_k,
+            options,
+        )
     return ChatResponse(
         answer=answer,
         citations=[CitationResponse.from_domain(value) for value in citations],
         retrieval_results=[RetrievalResultResponse.from_domain(value) for value in results],
+        retrieval_trace=RetrievalTraceResponse.from_domain(trace),
     )
 
 
@@ -209,9 +380,29 @@ async def stream_chat(payload: ChatRequest, request: Request) -> StreamingRespon
     """
 
     await container(request).repository.get_knowledge_base(payload.knowledge_base_id)
-    answer_stream, citations, results = await container(request).rag.stream_answer(
-        payload.knowledge_base_id, payload.query, payload.top_k
-    )
+    dependencies = container(request)
+    options = payload.to_options(dependencies.retrieval_defaults)
+    if payload.session_id:
+        prepared = await dependencies.chat.prepare_stream(
+            session_id=payload.session_id,
+            knowledge_base_id=payload.knowledge_base_id,
+            question=payload.query,
+            top_k=payload.top_k,
+            options=options,
+        )
+        answer_stream = prepared.stream
+        citations = list(prepared.citations)
+        results = list(prepared.results)
+        trace = prepared.trace
+        message_id = prepared.message_id
+    else:
+        answer_stream, citations, results, trace = await dependencies.rag.stream_answer_with_trace(
+            payload.knowledge_base_id,
+            payload.query,
+            payload.top_k,
+            options,
+        )
+        message_id = f"msg-{uuid4()}"
 
     # Evidence 在模型生成前已经稳定。通过自定义 data Part 与同一 assistant message 绑定，
     # 前端即使在答案仍生成时也能展示“依据了哪些 Chunk”，且无需维护第二套请求状态。
@@ -222,8 +413,8 @@ async def stream_chat(payload: ChatRequest, request: Request) -> StreamingRespon
         "retrieval_results": [
             RetrievalResultResponse.from_domain(value).model_dump(mode="json") for value in results
         ],
+        "retrieval_trace": RetrievalTraceResponse.from_domain(trace).model_dump(mode="json"),
     }
-    message_id = f"msg-{uuid4()}"
     text_id = f"text-{uuid4()}"
 
     async def event_stream() -> AsyncIterator[str]:
@@ -242,7 +433,10 @@ async def stream_chat(payload: ChatRequest, request: Request) -> StreamingRespon
             # 日志保留完整堆栈用于排查，浏览器只收到稳定文案，避免泄漏供应商响应或凭据。
             logger.exception(
                 "Streaming RAG generation failed",
-                extra={"knowledge_base_id": payload.knowledge_base_id},
+                extra={
+                    "knowledge_base_id": payload.knowledge_base_id,
+                    "chat_session_id": payload.session_id,
+                },
             )
             yield _ui_stream_event({"type": "text-end", "id": text_id})
             yield _ui_stream_event({"type": "error", "errorText": "生成过程中断，请稍后重试。"})

@@ -29,6 +29,7 @@ export interface KnowledgeBase {
 export interface DocumentItem {
   id: string;
   filename: string;
+  extension: string;
   status: string;
   error_message: string | null;
   parser_name: string | null;
@@ -46,6 +47,18 @@ export interface SourceLocator {
   slide: number | null;
 }
 
+/** 摄取期从原文抽取、经受控 API 提供的可展示资源。 */
+export interface DocumentAsset {
+  id: string;
+  kind: "IMAGE";
+  media_type: string;
+  filename: string;
+  title: string;
+  description: string;
+  locator: SourceLocator | null;
+  content_url: string;
+}
+
 export interface RetrievalResult {
   chunk_id: string;
   document_id: string;
@@ -54,6 +67,38 @@ export interface RetrievalResult {
   heading_path: string[];
   locator: SourceLocator | null;
   score: number;
+  dense_score: number | null;
+  sparse_score: number | null;
+  fusion_score: number | null;
+  rerank_score: number | null;
+  retrieval_sources: string[];
+  matched_content: string | null;
+  context_chunk_ids: string[];
+  content_types: Array<"HEADING" | "TEXT" | "CODE" | "LIST" | "QUOTE" | "TABLE" | "IMAGE">;
+  preview_url: string | null;
+  assets: DocumentAsset[];
+}
+
+export type RetrievalMode = "dense" | "sparse" | "hybrid";
+
+/** 一次 V3 Retrieval 的阶段执行结果，不包含 V5 在线链路追踪数据。 */
+export interface RetrievalTrace {
+  original_query: string;
+  query_variants: string[];
+  mode: RetrievalMode;
+  candidate_count: number;
+  result_count: number;
+  rewrite_applied: boolean;
+  rerank_applied: boolean;
+  parent_expansion_applied: boolean;
+  fallback_reasons: string[];
+  intent: "fact" | "document_summary";
+  strategy: "ranked_retrieval" | "structural_coverage" | string;
+}
+
+export interface RetrievalExplainResponse {
+  results: RetrievalResult[];
+  trace: RetrievalTrace;
 }
 
 export interface Citation {
@@ -62,6 +107,7 @@ export interface Citation {
   chunk_id: string;
   heading_path: string[];
   locator: SourceLocator | null;
+  context_chunk_ids: string[];
 }
 
 /** 把格式特有定位转换为用户可读短文本，顺序与后端 Prompt 保持一致。 */
@@ -80,6 +126,55 @@ export interface ChatResult {
   answer: string;
   citations: Citation[];
   retrieval_results: RetrievalResult[];
+  retrieval_trace: RetrievalTrace;
+}
+
+export interface ChatSession {
+  id: string;
+  knowledge_base_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatMessageRecord {
+  id: string;
+  role: "user" | "assistant";
+  status: "PENDING" | "COMPLETE" | "FAILED";
+  content: string;
+  error_message: string | null;
+  created_at: string;
+  retrieval_evidence: {
+    citations: Citation[];
+    retrieval_results: RetrievalResult[];
+    retrieval_trace: RetrievalTrace;
+  } | null;
+}
+
+export interface ChatSessionDetail {
+  session: ChatSession;
+  messages: ChatMessageRecord[];
+}
+
+/** 将持久化正文与证据恢复为 AI SDK UIMessage，刷新后仍能渲染图片和来源侧栏。 */
+export function toRAGMessages(records: ChatMessageRecord[]): RAGMessage[] {
+  return records
+    .filter((record) => record.status !== "PENDING")
+    .map((record) => {
+      const parts: RAGMessage["parts"] = [
+        {
+          type: "text" as const,
+          text:
+            record.status === "FAILED"
+              ? record.error_message || "这次回答未完成，请重新提问。"
+              : record.content,
+        },
+      ];
+      if (record.role === "assistant" && record.retrieval_evidence) {
+        parts.push({ type: "data-retrieval", data: record.retrieval_evidence });
+      }
+      return { id: record.id, role: record.role, parts };
+    });
 }
 
 /**
@@ -90,6 +185,7 @@ export type RAGDataParts = {
   retrieval: {
     citations: Citation[];
     retrieval_results: RetrievalResult[];
+    retrieval_trace: RetrievalTrace;
   };
 };
 

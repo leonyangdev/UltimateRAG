@@ -14,7 +14,7 @@ FastAPI（apps/api）
 RAG 核心库（src/ultimate_rag）
       │  通过「端口」调用外部能力
       ▼
-PostgreSQL（事实） · MinIO（原始文件） · Milvus（向量索引） · 百炼模型（Embedding/LLM/OCR/Vision）
+PostgreSQL（事实） · MinIO（原始文件） · Milvus（Dense/BM25 索引） · 百炼模型（Embedding/Rewrite/Rerank/LLM/OCR/Vision）
 ```
 
 ## 2. 分层架构
@@ -24,7 +24,7 @@ PostgreSQL（事实） · MinIO（原始文件） · Milvus（向量索引） ·
 ```text
 Interface（接口层）      apps/api：FastAPI 路由、请求/响应 Schema、依赖容器
      ↓ 调用
-Application（应用层）    application/services.py：显式业务工作流编排
+Application（应用层）    application/services.py + retrieval.py：显式业务工作流编排
      ↓ 依赖
 Domain（领域层）         domain/：领域模型（dataclass）+ 端口（Protocol）
      ↑ 实现
@@ -47,12 +47,12 @@ Domain 是最底层，谁都不依赖；Infrastructure 实现 Domain 定义的�
 
 ## 3. 两个进程，共用一套核心库
 
-V2 的关键设计是**把「上传」和「处理」拆到两个进程**，但二者共用同一个 Composition Root 装配：
+V2 引入的异步摄取在 V3 继续保留：**「上传」和「处理」分属两个进程**，但共用同一个 Composition Root：
 
 ```text
 进程 1：FastAPI（apps/api）
    ├── 处理上传：校验 → 存 MinIO → 建 Document+Job → 返回 202
-   └── 处理问答：检索 → 拼上下文 → LLM → 答案
+   └── 处理问答：过滤/改写 → Dense+BM25 → RRF/重排 → Small2Big → LLM
 
 进程 2：Worker（src/ultimate_rag/worker.py）
    └── 后台领取任务：解析 → 切块 → 向量化 → 索引 → READY
@@ -97,7 +97,7 @@ runtime.py（Composition Root）
 └────────────┬──────────────────┬───────────────┘
              │                  │
              ▼                  ▼
-      PostgreSQL(事实)      Milvus(向量)
+      PostgreSQL(事实)      Milvus(Dense + BM25)
              ▲
              │
 ┌────────────┴──────────────┐
@@ -105,8 +105,8 @@ runtime.py（Composition Root）
 │  (src/ultimate_rag/worker)│
 │                          │
 │ 领取 Job → Process：      │
-│  Parse → Chunk → Embed   │
-│  → Index → READY         │
+│ Parse → Chunk/Asset → Snapshot│
+│  → Embed → Index → READY │
 └────────────┬──────────────┘
              │
              ▼
@@ -117,12 +117,15 @@ runtime.py（Composition Root）
 
 领域层定义了一系列 **Protocol（端口）**，由不同的基础设施实现。这是「可替换」的根基：
 
-| 端口 | 职责 | V2 实现 |
+| 端口 | 职责 | V3 实现 |
 |---|---|---|
 | `DocumentParser` | 解析原始文件为统一模型 | Markdown / Word / Excel / PPT / HTML / PDF / Image |
 | `Chunker` | 切块 | `StructureAwareChunker` |
+| `ChunkSnapshotStore` | 保存/清理 Embedding 前可读快照 | `LocalChunkSnapshotStore` |
 | `Embedder` | 文本 → 向量 | `BailianEmbedder` |
-| `VectorStore` | 向量写入与检索 | `MilvusVectorStore` |
+| `VectorStore` | Dense/Sparse 派生索引写入与检索 | `MilvusVectorStore` |
+| `QueryRewriter` | 生成一个保守查询变体 | `BailianQueryRewriter` |
+| `Reranker` | 对有限候选做二阶段排序 | `BailianReranker` |
 | `ObjectStorage` | 原始文件存储 | `MinioObjectStorage` |
 | `LLMClient` | 文本生成 | `BailianLLMClient` |
 | `OCRClient` | 图片 → 文字 | `BailianOCRClient` |
@@ -135,7 +138,7 @@ runtime.py（Composition Root）
 这是一个常被问到的问题，项目的答案是：
 
 - **LangChain**：可以作为 Tool / Adapter，但**不能作为领域核心**。项目拥有自己的领域模型（`Document`、`Block`、`Chunk`…），不直接复用 LangChain 的 `Document` 数据结构。核心检索/生成不依赖 LangChain 的 Retriever/VectorStore。
-- **LangGraph**：V2 的处理流程是**确定性顺序工作流**（Parse → Chunk → Embed → Index，Retrieve → Generate），用普通 Python Service 编排已经足够。只有当未来出现条件路由、循环、Agent 决策等真实复杂度时，才考虑引入。
+- **LangGraph**：V3 虽有多个检索阶段，但仍是确定性流水线，用普通 Python Service 和并发召回已经足够。只有出现 Agent 决策、循环或人工介入等真实状态图时才考虑引入。
 
 ## 7. 关键设计原则速览
 

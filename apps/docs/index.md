@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "UltimateRAG"
   text: "企业级 RAG 平台学习指南"
-  tagline: 从零理解 RAG 原理，彻底看懂 UltimateRAG 的架构、模块与核心流程
+  tagline: 从文档智能到混合检索，彻底看懂 UltimateRAG V3 的架构、模块与核心流程
   actions:
     - theme: brand
       text: 开始学习 RAG
@@ -24,8 +24,14 @@ features:
     details: 逐个拆解 Parser、Chunker、Embedding、VectorStore、Worker、Generation 等每个模块的职责与代码。
     link: /modules/index
   - title: 🔄 核心流程
-    details: 文档摄取（Parse → Chunk → Embed → Index）与检索问答（Retrieve → Context → Generate）两条主链路的端到端追踪。
+    details: 文档摄取与 V3 检索问答（Rewrite → Dense/BM25 → RRF → Rerank → Small2Big）的端到端追踪。
     link: /workflows/ingestion
+  - title: 🔎 V3 高级检索
+    details: 理解 Dense、BM25、RRF、Query Rewrite、Reranker、Metadata Filter 与 Parent-Child 的工程取舍。
+    link: /guide/v3-capabilities
+  - title: 🖼️ 多模态答案与来源
+    details: 沿完整 RAG 链路理解图片 Asset、Markdown 表格、可点击 Citation、来源侧栏与历史证据恢复。
+    link: /workflows/query
   - title: 💻 代码导读
     details: 挑出最有代表性的核心代码，逐段解释设计意图、关键约束与失败行为。
     link: /workflows/code-tour

@@ -29,6 +29,7 @@
 │  exceptions.py（异常）    │   │  chunkers/（StructureAwareChunker）│
 └─────────────────────────┘   │  embeddings/（BailianEmbedder）     │
                               │  vectorstores/（MilvusVectorStore） │
+                              │  retrieval/（Rewrite/RRF/Rerank）   │
                               │  generation/（BailianLLMClient）    │
                               │  ocr/ + vision/（百炼 OCR/视觉）     │
                               │  infrastructure/（PostgreSQL+MinIO）│
@@ -46,6 +47,7 @@
 | **Chunker** | `chunkers/` | 统一模型 → 可检索 Chunk | [Chunker](/modules/chunker) |
 | **Embedding** | `embeddings/` | 文本 → 向量 | [Embedding](/modules/embeddings) |
 | **VectorStore** | `vectorstores/` | 向量写入与检索 | [VectorStore](/modules/vectorstore) |
+| **Retrieval** | `application/retrieval.py`、`retrieval/` | 过滤、混合召回、融合、重排与上下文扩展 | [Retrieval](/modules/retrieval) |
 | **Generation** | `generation/` | LLM 生成答案 | [Generation](/modules/generation) |
 | **Worker** | `worker.py` | 后台异步处理任务 | [Worker](/modules/worker) |
 | **Infrastructure** | `infrastructure/` | PostgreSQL + MinIO 实现 | [Infrastructure](/modules/infrastructure) |
@@ -79,10 +81,11 @@ worker.py（后台）
 ```text
 apps/api/routes.py（/chat 或 /chat/stream）
   → RAGService.answer / stream_answer
-      → RetrievalService.search
-          → BailianEmbedder.embed_query
-          → MilvusVectorStore.search
-          → Repository.list_ready_document_ids（二次过滤）
+      → RetrievalService.retrieve
+          → PostgreSQL READY / 文档白名单
+          → Query Rewrite（原查询保留）
+          → Dense + BM25 并发召回 → RRF → Reranker
+          → Small2Big 相邻上下文
       → ContextBuilder.build（拼上下文）
       → BailianLLMClient.generate / stream
       → 返回 answer + citations + retrieval_results

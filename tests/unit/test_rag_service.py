@@ -6,7 +6,13 @@ from typing import cast
 import pytest
 
 from ultimate_rag.application import ContextBuilder, RAGService, RetrievalService
-from ultimate_rag.domain.models import RetrievalResult
+from ultimate_rag.domain.models import (
+    RetrievalMode,
+    RetrievalOptions,
+    RetrievalResult,
+    RetrievalRun,
+    RetrievalTrace,
+)
 from ultimate_rag.domain.ports import LLMClient
 
 
@@ -19,6 +25,30 @@ class FakeRetrievalService:
     async def search(self, knowledge_base_id: str, query: str, top_k: int) -> list[RetrievalResult]:
         """保持测试结果顺序，以便断言 Citation 和答案上下文使用同一排名。"""
         return self._results[:top_k]
+
+    async def retrieve(
+        self,
+        knowledge_base_id: str,
+        query: str,
+        top_k: int,
+        options: RetrievalOptions | None = None,
+    ) -> RetrievalRun:
+        """返回带最小 Trace 的 V3 结果，行为仍由测试预设列表决定。"""
+
+        results = tuple(self._results[:top_k])
+        return RetrievalRun(
+            results=results,
+            trace=RetrievalTrace(
+                original_query=query,
+                query_variants=(query,),
+                mode=RetrievalMode.DENSE,
+                candidate_count=len(results),
+                result_count=len(results),
+                rewrite_applied=False,
+                rerank_applied=False,
+                parent_expansion_applied=False,
+            ),
+        )
 
 
 class FakeLLMClient:

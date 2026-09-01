@@ -21,6 +21,7 @@
 from collections.abc import AsyncIterator
 
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessageParam
 
 
 class BailianLLMClient:
@@ -42,22 +43,37 @@ class BailianLLMClient:
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
         self._model = model
 
-    async def generate(self, system_prompt: str, user_prompt: str) -> str:
+    async def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
         """执行一次低温度完整生成，并拒绝模型返回空答案。
 
         ``temperature=0.1`` 用于减少企业知识问答中的随机发挥，使相同证据下的回答更稳定；
         它不是安全边界，事实约束仍由系统 Prompt、检索证据和 Citation 共同保证。
         """
-        response = await self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,
-        )
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        if max_tokens is None:
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=0.1,
+            )
+        else:
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=max_tokens,
+            )
         content = response.choices[0].message.content
-        if not content:
+        if not isinstance(content, str) or not content:
             raise RuntimeError("LLM returned an empty answer")
         return content
 

@@ -85,7 +85,7 @@ async def stream(self, system_prompt, user_prompt) -> AsyncIterator[str]:
 
 ## 6. 为什么用百炼而不是自建模型
 
-V2 当前接入百炼 `qwen-plus`：
+V3 的答案生成继续使用百炼 `qwen-plus`；Query Rewrite 虽可复用同一模型，但属于独立 Retrieval 端口：
 
 - 推理质量稳定，免去模型部署运维
 - 提供 OpenAI 兼容协议，SDK 生态成熟

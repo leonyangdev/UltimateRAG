@@ -4,7 +4,9 @@
 
 ## 1. 这一层是什么
 
-Worker 是**与 FastAPI 完全分离的独立进程**。上传请求只入队，Worker 进程循环领取任务并执行耗时处理（Parse → Chunk → Embed → Index）。这解决了「HTTP 请求内完成大文档处理」会阻塞、易超时、崩溃无恢复的问题。
+Worker 是**与 FastAPI 完全分离的独立进程**。上传请求只入队，Worker 进程循环领取任务并执行
+耗时处理（Parse → Chunk/Asset → Snapshot → Embed → Index）。这解决了「HTTP 请求内完成大文档处理」会
+阻塞、易超时、崩溃无恢复的问题，也让 PDF 图片的 Vision 与 MinIO Asset 写入不占用上传连接。
 
 ## 2. 为什么不用 Redis/Kafka
 

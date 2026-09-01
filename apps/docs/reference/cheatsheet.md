@@ -8,10 +8,11 @@
 src/ultimate_rag/
 ├── domain/                 # 领域层（项目词汇表）
 │   ├── models.py           #   Document / Block / Chunk / RetrievalResult / Citation ...
-│   ├── ports.py            #   8 个 Protocol 端口
+│   ├── ports.py            #   Parser / Embedder / VectorStore / Rewrite / Rerank 等端口
 │   └── exceptions.py       #   业务异常体系
 ├── application/            # 应用层（业务编排）
-│   ├── services.py         #   Ingestion / Processing / Retrieval / RAG / Lifecycle
+│   ├── services.py         #   Ingestion / Processing / RAG / Lifecycle
+│   ├── retrieval.py        #   V3 高级检索显式编排
 │   └── context.py          #   ContextBuilder 拼上下文
 ├── parsers/                # 7 种格式 → ParsedDocument
 │   ├── registry.py         #   按 supports() 选 Parser
@@ -20,6 +21,8 @@ src/ultimate_rag/
 ├── chunkers/markdown.py    # StructureAwareChunker 切块
 ├── embeddings/bailian.py   # BailianEmbedder 向量化
 ├── vectorstores/milvus.py  # MilvusVectorStore
+├── retrieval/              # 百炼 Rewrite/Rerank 适配器 + RRF 纯函数
+├── evaluation/             # Precision/Recall/MRR/nDCG 确定性指标
 ├── generation/bailian.py   # BailianLLMClient 生成
 ├── ocr/  vision/           # 百炼 OCR 与视觉理解适配器
 ├── infrastructure/
@@ -56,13 +59,14 @@ apps/web/                   # Next.js 前端
 | Block | 解析后的最小结构单元（标题/正文/表格/代码/图片） |
 | Chunk | 用于向量化的切块单元 |
 | EmbeddedChunk | Chunk + 其向量 |
-| RetrievalResult | 一次检索命中（含来源定位与相似度） |
+| RetrievalResult | 一次检索命中（来源定位、各阶段分数和上下文范围） |
+| RetrievalTrace | 查询变体、执行阶段、候选数和降级原因 |
 | Citation | 答案引用的结构化来源 |
 | SourceLocator | 跨格式原文位置（页码/区域/幻灯片） |
 | Port（端口） | 领域层定义的抽象接口（Protocol） |
 | Adapter（适配器） | 基础设施层对端口的实现 |
 | Composition Root | 集中装配所有依赖的入口 |
-| 派生索引 | Milvus 中可由事实数据重建的向量索引 |
+| 派生索引 | Milvus 中可由事实数据重建的 Dense/BM25 索引 |
 
 ## 4. 状态值速查
 
@@ -100,6 +104,8 @@ PENDING → RUNNING → SUCCEEDED
 | `Chunker` | StructureAwareChunker |
 | `Embedder` | BailianEmbedder |
 | `VectorStore` | MilvusVectorStore |
+| `QueryRewriter` | BailianQueryRewriter |
+| `Reranker` | BailianReranker |
 | `ObjectStorage` | MinioObjectStorage |
 | `LLMClient` | BailianLLMClient |
 | `OCRClient` | BailianOCRClient |
@@ -117,6 +123,8 @@ PENDING → RUNNING → SUCCEEDED
 | 任务怎么领取/续租 | `infrastructure/database/repository.py` → `claim_ingestion_job` |
 | Worker 循环 | `worker.py` → `IngestionWorker` |
 | 一个问题怎么被回答 | `application/services.py` → `RAGService` |
+| 高级检索怎么执行 | `application/retrieval.py` → `RetrievalService` |
+| RRF 怎么融合 | `retrieval/fusion.py` |
 | 流式协议 | `apps/api/routes.py` → `stream_chat` |
 | 有哪些 API | `apps/api/routes.py` |
 | 配置项 | `config.py` |

@@ -134,7 +134,7 @@ PDFium 逐页探测文字量与栅格覆盖
         ├─ 分栏阅读顺序、标题层级、正文
         ├─ 表格 → Markdown TABLE
         ├─ 页码 + BBox
-        └─ 图片裁剪 → 百炼视觉模型 → IMAGE Block
+        └─ 图片裁剪 → 百炼视觉模型 → IMAGE Block + ParsedAsset
 ```
 
 关键点：
@@ -144,6 +144,29 @@ PDFium 逐页探测文字量与栅格覆盖
 - 扫描判定要求低文字与大图覆盖同时成立；扫描 OCR 稀疏时补 Vision，调用有界并发
 - 重复页眉页脚过滤；BBox 统一为左上角原点
 - 单张附图理解失败 → 降级 OCR → 再失败跳过（不影响正文）；整页扫描 OCR 失败 → 任务失败可重试
+- 图片先由 Docling 裁出 JPEG，再由百炼 Vision 生成题注补全、结构关系和可检索描述；Parser
+  在原阅读位置写入 `![标题](asset://稳定ID)`，同时返回不依赖 MinIO 的 `ParsedAsset`
+- Worker 将 Asset 字节写入 MinIO，将 ID、Block、题名、摘要、SHA-256、页码/BBox 写入
+  PostgreSQL；Chunk 只携带 `asset_ids`，Milvus 不存二进制或内部 Object Key
+- 表格保留为 Markdown `TABLE` Block；切块时按行处理并重复题注、表头和二级表头，模型可在
+  答案中直接输出表格源数据
+- 普通正文/表格仍可用 `page + bbox` 由 PDFium 按需裁切；已抽取图片优先读取持久化 Asset，
+  避免每次打开回答都重新解析 PDF 或调用 Vision
+
+### 6.1 为什么必须同时保留“语义文本”和“图片 Asset”
+
+只保存图片会导致 Dense/BM25 无法理解图中内容；只保存 Vision 描述又会出现“检索到了图，
+但回答无法展示图”的断层。因此 IMAGE Block 由两部分组成：
+
+```markdown
+![Transformer 架构图](asset://2b6f...)
+
+图片解读：
+图中左侧是 Encoder，右侧是 Decoder……
+```
+
+Embedding 使用整段可检索文本，`asset://` 只作为稳定资源引用。前端只有在同一 RetrievalResult
+的 Asset 白名单中找到该 ID 时才加载图片；文档正文伪造的 ID 不会被渲染。
 
 ## 7. 新增一种格式要做什么（扩展点）
 

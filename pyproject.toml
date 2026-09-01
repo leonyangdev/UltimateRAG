@@ -1,6 +1,6 @@
 [project]
 name = "ultimate-rag"
-version = "2.0.0"
+version = "3.0.0"
 description = "An evolvable enterprise-grade RAG platform"
 readme = "README.md"
 requires-python = ">=3.12"

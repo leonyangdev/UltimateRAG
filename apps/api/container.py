@@ -8,11 +8,14 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from ultimate_rag.application import (
+    ChatService,
     DocumentLifecycleService,
     IngestionService,
     RAGService,
     RetrievalService,
+    VisualEvidenceService,
 )
+from ultimate_rag.domain.models import RetrievalOptions
 from ultimate_rag.infrastructure.database.repository import Repository
 
 
@@ -25,5 +28,8 @@ class Container:
     repository: Repository
     ingestion: IngestionService
     retrieval: RetrievalService
+    retrieval_defaults: RetrievalOptions
     rag: RAGService
+    chat: ChatService
+    visual_evidence: VisualEvidenceService
     lifecycle: DocumentLifecycleService

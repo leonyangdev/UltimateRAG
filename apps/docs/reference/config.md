@@ -16,9 +16,16 @@
 |---|---|
 | 限制上传文件大小 | `MAX_UPLOAD_BYTES`（默认 10MB） |
 | 调整 Chunk 大小 | `CHUNK_MAX_TOKENS`（512）、`CHUNK_OVERLAP_TOKENS`（64） |
+| 修改 Embedding 前 Chunk 快照目录 | `CHUNK_SNAPSHOT_DIR`（`data/chunk_snapshots`） |
 | 换问答模型 | `LLM_MODEL`（qwen-plus） |
 | 换 Embedding 模型 | `EMBEDDING_MODEL`（text-embedding-v4）、`EMBEDDING_DIMENSION`（1024） |
+| 换 Query Rewrite / Rerank 模型 | `QUERY_REWRITE_MODEL`（qwen-plus）、`RERANK_MODEL`（qwen3-rerank） |
+| 收紧 Rerank 请求预算 | `RERANK_MAX_REQUEST_TOKENS`（120000，Adapter 另留 10% 余量） |
 | 换 OCR / 视觉模型 | `OCR_MODEL`（qwen3.5-ocr）、`VISION_MODEL`（qwen3-vl-flash） |
+| 调整高级检索候选与融合 | `RETRIEVAL_CANDIDATE_K`（30）、`RETRIEVAL_RRF_K`（60） |
+| 默认关闭可选线上阶段 | `RETRIEVAL_QUERY_REWRITE`、`RETRIEVAL_RERANK` |
+| 调整 Small2Big | `RETRIEVAL_PARENT_EXPANSION`、`RETRIEVAL_PARENT_WINDOW`、`RETRIEVAL_PARENT_MAX_TOKENS` |
+| 调整 BM25 | `BM25_K1`（1.2）、`BM25_B`（0.75）；改后显式重建 Sparse Collection |
 | 增大检索上下文 | `CONTEXT_MAX_CHARS`（12000） |
 | 增加任务重试次数 | `INGESTION_JOB_MAX_ATTEMPTS`（3） |
 | 加快/放慢 Worker 轮询 | `WORKER_POLL_INTERVAL_SECONDS`（1.0） |
@@ -35,12 +42,19 @@
 |---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://ultimate_rag:ultimate_rag@localhost:5432/ultimate_rag` |
 | `MINIO_ENDPOINT` / `MINIO_BUCKET` | `localhost:9000` / `documents` |
-| `MILVUS_URI` / `MILVUS_COLLECTION` | `http://localhost:19530` / `knowledge_chunks` |
+| `MILVUS_URI` / `MILVUS_COLLECTION` | `http://localhost:19530` / `knowledge_chunks`（Dense） |
+| `MILVUS_SPARSE_COLLECTION` | `knowledge_chunks_sparse_v3` |
+| `CHUNK_SNAPSHOT_DIR` | `data/chunk_snapshots`（Docker 内为 `/app/data/chunk_snapshots`） |
+| `RERANK_URL` | `https://dashscope.aliyuncs.com/compatible-api/v1/reranks` |
 | `DASHSCOPE_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 
 ## 4. 跨字段校验（违反即启动失败）
 
 - `CHUNK_OVERLAP_TOKENS` 必须小于 `CHUNK_MAX_TOKENS`
+- `RETRIEVAL_PARENT_MAX_TOKENS` 必须不小于 `CHUNK_MAX_TOKENS`
+- 全文总结使用 `SUMMARY_*` 独立预算，不受普通问答 `TOP_K` 和 `CONTEXT_MAX_CHARS` 限制
+- 原始会话消息不会因 `CHAT_RECENT_TOKEN_BUDGET` 被删除，超出部分只生成可重建摘要
+- `RERANK_MAX_REQUEST_TOKENS` 必须位于 10000–120000
 - `WORKER_HEARTBEAT_SECONDS` 必须小于 `WORKER_LEASE_SECONDS`
 
 ## 5. 前端
@@ -55,9 +69,12 @@
 DASHSCOPE_BASE_URL=https://你的百炼工作空间地址/compatible-mode/v1
 DASHSCOPE_API_KEY=你的API-Key
 
+CHUNK_SNAPSHOT_DIR=data/chunk_snapshots
+
 NEXT_PUBLIC_API_URL=
 ```
 
 ::: warning
-`.env` 与真实密钥禁止提交到 Git。生产部署必须覆盖默认凭据与 `DOCLING_DEVICE`。
+`.env` 与真实密钥禁止提交到 Git。Chunk 快照包含文档明文，默认目录也已被 Git 忽略；生产部署
+必须设置访问权限、容量监控，并覆盖默认凭据与 `DOCLING_DEVICE`。
 :::

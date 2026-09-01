@@ -36,3 +36,25 @@ async def test_ingestion_rejects_extension_mime_mismatch_before_storage() -> Non
         )
 
     storage.put.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reindex_requeues_existing_document_with_configured_attempt_limit() -> None:
+    """存量回填应只重置后台任务，不重新上传或复制原始文件。"""
+
+    repository = AsyncMock()
+    repository.requeue_document.return_value = object()
+    storage = AsyncMock()
+    service = IngestionService(
+        repository=cast(Repository, repository),
+        storage=cast(ObjectStorage, storage),
+        parser_registry=ParserRegistry([MarkdownParser()]),
+        max_upload_bytes=1024,
+        job_max_attempts=4,
+    )
+
+    result = await service.reindex("document-1")
+
+    assert result is repository.requeue_document.return_value
+    repository.requeue_document.assert_awaited_once_with("document-1", max_attempts=4)
+    storage.put.assert_not_awaited()

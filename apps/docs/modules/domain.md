@@ -37,8 +37,10 @@ class Chunk:
 - 状态枚举：`DocumentStatus`、`IngestionJobStatus`、`BlockType`
 - 值对象：`SourceLocator`（来源定位）
 - 实体：`KnowledgeBase`、`Document`、`IngestionJob`
-- 中间结果：`DocumentSource`、`Block`、`ParsedDocument`
-- 检索/引用：`Chunk`、`EmbeddedChunk`、`RetrievalResult`、`Citation`
+- 中间结果：`DocumentSource`、`Block`、`ParsedDocument`、`ParsedAsset`
+- 检索/引用：`Chunk`、`EmbeddedChunk`、`RetrievalResult`、`Citation`、`DocumentPreview`
+- 资源：`DocumentAsset`、`DocumentAssetContent`
+- 会话：`ChatSession`、`ChatMessage`、`ChatTurn`、`ChatEvidence`
 
 所有对象都是 `frozen=True`（不可变），保证跨层传递安全、便于测试。
 
@@ -60,23 +62,28 @@ class Embedder(Protocol):
 class VectorStore(Protocol):
     async def ensure_collection(self) -> None: ...
     async def upsert(self, chunks) -> None: ...
+    async def upsert_sparse(self, chunks) -> None: ...
     async def search(self, query_vector, knowledge_base_id, top_k) -> list[RetrievalResult]: ...
+    async def search_sparse(self, query, knowledge_base_id, top_k) -> list[RetrievalResult]: ...
     async def delete_by_document(self, document_id) -> None: ...
     async def delete_by_knowledge_base(self, knowledge_base_id) -> None: ...
 ```
 
-8 个端口一览：
+V3 端口一览：
 
-| 端口 | 方法 | V2 实现 |
+| 端口 | 方法 | V3 实现 |
 |---|---|---|
 | `DocumentParser` | `supports` / `parse` | 7 种 Parser |
 | `Chunker` | `split` | `StructureAwareChunker` |
 | `Embedder` | `embed_documents` / `embed_query` | `BailianEmbedder` |
-| `VectorStore` | `ensure_collection` / `upsert` / `search` / `delete_*` | `MilvusVectorStore` |
+| `VectorStore` | Dense/Sparse `upsert` / `search` / `delete_*` | `MilvusVectorStore` |
+| `QueryRewriter` | `rewrite` | `BailianQueryRewriter` |
+| `Reranker` | `rerank` | `BailianReranker` |
 | `ObjectStorage` | `ensure_bucket` / `put` / `get` / `delete` | `MinioObjectStorage` |
 | `LLMClient` | `generate` / `stream` | `BailianLLMClient` |
 | `OCRClient` | `extract_text` | `BailianOCRClient` |
 | `VisionClient` | `describe` | `BailianVisionClient` |
+| `PDFPreviewRenderer` | `render` | `PDFiumPreviewRenderer` |
 
 ::: tip 为什么用 Protocol 而不是抽象类
 Protocol 是「鸭子类型」接口：只要类实现了这些方法签名，就自动满足接口，不需要继承。这让测试时可以轻松注入内存 Stub（假实现），不访问真实外部服务。

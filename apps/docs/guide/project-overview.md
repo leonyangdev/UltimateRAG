@@ -42,32 +42,29 @@ V6.0  Intelligent RAG        智能 RAG：Agent、Tool Calling、工作流
 例如 V1 不应提前引入 Kafka、Kubernetes、GraphRAG 等。
 :::
 
-## 3. 当前版本：V2.0 Document Intelligence
+## 3. 当前版本：V3.0 Advanced Retrieval
 
-仓库当前实现 **V2.0**。它在 V1 可运行的 RAG 闭环之上，重点解决两个问题：
+仓库当前实现 **V3.0**。它完整保留 V2 的多格式文档智能与异步摄取，重点解决“能搜到，但精确词
+容易遗漏、排序不够准、上下文太碎且过程不可解释”的问题。
 
-1. **多格式统一**：把 Markdown / PDF / DOCX / XLSX / PPTX / HTML / 图片统一为可追溯的文档领域模型
-2. **异步可靠摄取**：上传立即返回，由独立 Worker 后台处理，进程重启不丢任务
+### V3 能做什么（用户视角）
 
-### V2 能做什么（用户视角）
+1. 上传 Markdown、PDF、DOCX、XLSX、PPTX、HTML 或图片，并在后台可靠处理
+2. 使用本地 Docling 解析复杂 PDF，扫描页和图片按需调用百炼 OCR/Vision
+3. 在 Dense、Milvus BM25 Sparse、Hybrid 三种召回模式之间切换
+4. 用 RRF 融合不同查询变体和召回通道，再用 `qwen3-rerank` 重排有限候选
+5. 保留原查询并可生成一个保守改写，模型故障时明确降级
+6. 按最多 50 个文档 ID 过滤，并以 PostgreSQL `READY` 状态约束所有命中
+7. 命中小 Child 后扩展同 Parent 的有限相邻内容，兼顾检索精度与回答上下文
+8. 查看每阶段分数、查询变体、来源通道、降级原因与最终引用
+9. 用离线指标脚本比较 Dense/Sparse/Hybrid 和 Rewrite/Rerank 消融实验
 
-1. 创建知识库
-2. 上传 Markdown、PDF、DOCX、XLSX、PPTX、HTML 或常见图片
-3. 上传在「文件与任务可靠落库」后立即返回（HTTP 202），由独立 Worker 后台处理
-4. 文字型 PDF 用本地 Docling 恢复分栏、表格、图片和 BBox；扫描页及独立图片融合百炼 OCR/Vision
-5. 前端自动刷新文档从 `PENDING` 到 `READY/FAILED` 的状态和实际使用的 Parser
-6. 用 Milvus Dense Retrieval 独立调试召回内容和分数（不依赖 LLM）
-7. 用阿里云百炼模型进行知识库问答
-8. 查看答案引用的章节、PDF 页码/BBox、Excel 区域或 PPT 幻灯片
-9. 删除文档或知识库，并同步清理三类存储（Milvus 向量、MinIO 原文件、PostgreSQL 事实）
-
-### V2 明确不包含（属于后续版本）
+### V3 明确不包含（属于后续版本）
 
 ```text
-混合检索 / Reranker / Query Rewrite     → V3
 ACL / 审计 / DLQ 控制台 / 认证          → V4
-评估体系 / RAGOps                       → V5
-Agent / Tool Calling / LangGraph       → V6
+Golden Dataset 管理 / 在线 RAGOps       → V5
+Agent / Tool Calling / LangGraph        → V6
 ```
 
 ## 4. 技术栈速览
@@ -78,8 +75,8 @@ Agent / Tool Calling / LangGraph       → V6
 | 接口 | FastAPI、Pydantic v2 |
 | 核心库 | Python 3.12、SQLAlchemy 2（async）、Alembic、tiktoken |
 | 文档解析 | Docling（PDF 版面/表格）、PDFium、python-docx、openpyxl、python-pptx、BeautifulSoup、markdown-it-py、Pillow |
-| 数据存储 | PostgreSQL 16（事实）、MinIO（原始文件）、Milvus 2.5（向量索引）、Attu（调试） |
-| 模型（阿里云百炼） | Embedding `text-embedding-v4`(1024维) / LLM `qwen-plus` / OCR `qwen3.5-ocr` / 视觉 `qwen3-vl-flash` |
+| 数据存储 | PostgreSQL 16（事实）、MinIO（原始文件）、Milvus 2.5（Dense + 本地 BM25 派生索引）、Attu（调试） |
+| 模型（阿里云百炼） | Embedding `text-embedding-v4` / Rewrite 与 LLM `qwen-plus` / Rerank `qwen3-rerank` / OCR `qwen3.5-ocr` / 视觉 `qwen3-vl-flash` |
 | 工程 | uv、pytest、Ruff、Mypy、Docker Compose |
 
 ## 5. 架构一句话总结
@@ -87,7 +84,7 @@ Agent / Tool Calling / LangGraph       → V6
 ```text
 Next.js Web → FastAPI Interface → Application Service
                                       ├── 入库：提交任务 → MinIO + PostgreSQL → Worker 后台解析/切块/向量化/索引
-                                      └── 问答：检索 → 拼上下文 → LLM → 答案 + 引用
+                                      └── 问答：过滤/改写 → Dense+BM25 → RRF/重排 → Small2Big → LLM
 
 PostgreSQL(事实) + MinIO(原文件)    ← 可重建来源
 Milvus(派生索引)                    ← 可重建产物
@@ -111,5 +108,6 @@ docker compose up -d --build
 
 ## 下一步
 
-- 想知道 V2 具体支持哪些格式、有什么限制 → [V2 能力与限制](/guide/v2-capabilities)
+- 想知道 V3 的高级检索能力和限制 → [V3 能力与限制](/guide/v3-capabilities)
+- 想回顾 V2 支持的文档格式 → [V2 能力与限制](/guide/v2-capabilities)
 - 想从架构分层看起 → [整体架构与分层](/architecture/overview)

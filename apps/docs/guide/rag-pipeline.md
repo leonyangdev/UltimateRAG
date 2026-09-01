@@ -106,8 +106,8 @@ Markdown / PDF / DOCX / XLSX / PPTX / HTML / 图片
 
 **核心要点：入库产生「事实数据 + 派生索引」，问答只消费它们。**
 
-- PostgreSQL 保存**事实**（文档状态、Chunk 文本与元数据）
-- MinIO 保存**原始文件**
+- PostgreSQL 保存**事实**（文档状态、Chunk、Asset 元数据、会话与回答证据）
+- MinIO 保存**原始文件和抽取图片 Asset**
 - Milvus 保存**可重建的派生索引**（丢了可以用事实数据重新生成）
 
 ---

@@ -11,6 +11,7 @@ import {
   Clock3,
   FileText,
   LoaderCircle,
+  RefreshCw,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -53,6 +54,7 @@ export default function KnowledgeBaseWorkspacePage() {
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [pageError, setPageError] = useState("");
   const [isUploading, setIsUploading] = useState(false);
+  const [reindexingId, setReindexingId] = useState<string | null>(null);
 
   const readyCount = documents.filter((document) => document.status === "READY").length;
   const hasProcessingDocuments = documents.some(
@@ -157,6 +159,24 @@ export default function KnowledgeBaseWorkspacePage() {
     }
   }
 
+  /** 使用已有 MinIO 原文件重新入队，供 Parser 升级后回填 Asset 与新 Chunk。 */
+  async function reindexDocument(documentId: string) {
+    setReindexingId(documentId);
+    setPageError("");
+    try {
+      const accepted = await api<DocumentItem>(`/api/documents/${documentId}/reindex`, {
+        method: "POST",
+      });
+      setDocuments((current) =>
+        current.map((document) => (document.id === accepted.id ? accepted : document)),
+      );
+    } catch (value) {
+      setPageError(value instanceof Error ? value.message : "文档重新解析提交失败");
+    } finally {
+      setReindexingId(null);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-5xl px-4 py-10 sm:px-6">
       {/* ─── 头部：返回入口 + 知识库信息 + 问答入口 ─── */}
@@ -176,7 +196,7 @@ export default function KnowledgeBaseWorkspacePage() {
             </h1>
             <Badge className="shrink-0 border-emerald-200 bg-emerald-50 text-sm text-emerald-700 shadow-none hover:bg-emerald-50">
               <span className="size-1 rounded-full bg-emerald-500" />
-              V2
+              V3
             </Badge>
           </div>
           <p className="mt-2 max-w-2xl text-base leading-7 text-muted-foreground">
@@ -193,7 +213,7 @@ export default function KnowledgeBaseWorkspacePage() {
         </div>
 
         <Button asChild className="shrink-0">
-          <Link href="/chat">
+          <Link href={`/chat?knowledge_base_id=${id}`}>
             进入知识问答
             <ArrowRight />
           </Link>
@@ -296,18 +316,34 @@ export default function KnowledgeBaseWorkspacePage() {
                       </p>
                     )}
                   </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    className="size-8 shrink-0 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100 focus:opacity-100"
-                    onClick={() => removeDocument(document.id)}
-                    disabled={!canDelete}
-                    title={canDelete ? "删除文档" : "后台处理完成后才能删除"}
-                    aria-label={`删除 ${document.filename}`}
-                  >
-                    <Trash2 className="size-4" />
-                  </Button>
+                  <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="size-8 text-muted-foreground hover:text-primary"
+                      onClick={() => reindexDocument(document.id)}
+                      disabled={!canDelete || reindexingId === document.id}
+                      title={canDelete ? "使用原文件重新解析并重建索引" : "后台处理完成后才能重建"}
+                      aria-label={`重新解析 ${document.filename}`}
+                    >
+                      <RefreshCw
+                        className={`size-4 ${reindexingId === document.id ? "animate-spin" : ""}`}
+                      />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="size-8 text-muted-foreground hover:text-destructive"
+                      onClick={() => removeDocument(document.id)}
+                      disabled={!canDelete}
+                      title={canDelete ? "删除文档" : "后台处理完成后才能删除"}
+                      aria-label={`删除 ${document.filename}`}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
                 </article>
               );
             })}

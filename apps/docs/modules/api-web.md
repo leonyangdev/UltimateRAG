@@ -36,7 +36,12 @@ async def lifespan(app: FastAPI):
 
     # 阶段 2：LLM 只属于 HTTP 问答进程；后台 Worker 不创建生成模型客户端
     llm = BailianLLMClient(...)
-    retrieval = RetrievalService(runtime.embedder, runtime.vector_store, runtime.repository)
+    retrieval = RetrievalService(
+        runtime.embedder, runtime.vector_store, runtime.repository,
+        query_rewriter=BailianQueryRewriter(...),
+        reranker=BailianReranker(...),
+        default_options=RetrievalOptions(mode=RetrievalMode.HYBRID, ...),
+    )
 
     # 阶段 3：集中放入进程级 Container，Route 只从 app.state 取服务
     app.state.container = Container(
@@ -81,13 +86,17 @@ DELETE /api/knowledge-bases/{id}                 → 204 删除
 POST   /api/knowledge-bases/{kb_id}/documents    → 202 上传入队（不等待处理）
 GET    /api/knowledge-bases/{kb_id}/documents    → 列表 + 实时状态
 GET    /api/documents/{doc_id}                   → 单个元数据
+POST   /api/documents/{doc_id}/reindex           → 202 复用原文件重新解析/重建
 DELETE /api/documents/{doc_id}                   → 204 删除
+GET    /api/chunks/{chunk_id}/preview             → PDF 命中区域 JPEG（按需渲染）
+GET    /api/assets/{asset_id}/content              → 摄取期抽取图片（MinIO）
 ```
 
 **问答**
 
 ```text
 POST   /api/retrieval/search                     → 纯检索（不依赖 LLM，可独立调试）
+POST   /api/retrieval/explain                    → 结果 + V3 阶段 Trace
 POST   /api/chat                                 → 完整问答（答案 + 引用 + 召回证据）
 POST   /api/chat/stream                          → SSE 流式问答（AI SDK UI Message Stream）
 GET    /api/health                               → 存活检查（不触发模型调用）
@@ -111,14 +120,17 @@ async def _read_bounded_upload(file, max_upload_bytes) -> bytes:
 使用 **AI SDK Data Stream Protocol** 的 SSE 表示：
 
 ```text
-start → start-step → data-retrieval（引用+证据随同一条消息）→ text-start
+start → start-step → data-retrieval（引用+证据+Trace 随同一条消息）→ text-start
      → text-delta × N → text-end → finish-step → finish → [DONE]
 ```
 
 关键点：
 
 - **检索在 StreamingResponse 建立前完成**：知识库不存在、Embedding 失败、Milvus 不可用时，仍能返回结构化 HTTP 状态码
-- **Citation/RetrievalResult 通过有类型的 `data-retrieval` Part 同消息返回**：前端不需要在流结束后再发请求补取证据
+- **Citation/RetrievalResult/RetrievalTrace 通过有类型的 `data-retrieval` Part 同消息返回**：前端不需要在流结束后再发请求补取证据
+- PDF 结果携带 `content_types + assets + preview_url`；答案内 `asset://ID` 只在当前证据白名单内
+  映射为图片，GFM 表格直接渲染，普通区域仍可懒加载原 PDF 局部截图
+- `[来源 N](citation://N)` 是前端交互协议，不发网络请求；点击后按 Citation 顺序打开右侧来源栏
 - LLM 在响应开始后的故障只能编码为 `error` Part（此时 200 已发出），日志保留完整堆栈，浏览器只收到稳定文案
 - 响应头：
   - `X-Accel-Buffering: no`：关闭 Nginx 缓冲，让 token 及时抵达
@@ -136,6 +148,8 @@ ChatRequest(RetrievalRequest):
 - 外部字段用产品语义的 `question`，内部统一 `query`
 - `from_domain()` 类方法负责领域对象 → API 结构的显式映射
 - `RetrievalRequest.top_k`：`ge=1, le=20` 边界校验
+- `candidate_k` 最大 100，`document_ids` 最大 50；空白 Query/ID 在 HTTP 边界拒绝
+- 模式与可选阶段可逐请求覆盖部署默认值
 
 ## 第二部分：前端（Next.js）
 
@@ -156,7 +170,7 @@ react-markdown + remark-gfm — 渲染答案 Markdown
 |---|---|
 | `/` | 首页入口 |
 | `/knowledge-bases` | 知识库列表、创建 |
-| `/knowledge-bases/[id]` | 知识库详情：文档上传、状态轮询、删除 |
+| `/knowledge-bases/[id]` | 知识库详情：上传、状态轮询、重新解析、删除 |
 | `/chat` | 聊天界面：流式问答 + 证据展示 |
 
 ### 11. API 调用封装（`app/lib.ts`）
@@ -207,8 +221,19 @@ export type RAGMessage = UIMessage<unknown, RAGDataParts>;
 ```
 
 - 与后端 `data-retrieval` Part 对应：引用和召回结果随 assistant message 一起到达，**刷新 React 状态时不会与文本流错配**
+- 正常完成的助手消息还把同一证据快照写入 PostgreSQL；选择历史会话时恢复相同 Part，不重新检索
 
-### 14. 文档状态轮询
+### 14. 富媒体安全边界
+
+`react-markdown` 自定义渲染器只识别两种内部协议：
+
+- `asset://<uuid>`：必须能在本消息 `retrieval_results[].assets` 中找到，才映射 API URL；
+- `citation://N`：只改变本地侧栏状态，来源详情来自后端 Citation/Result。
+
+模型输出的任意公网图片不会自动加载，避免恶意知识通过像素请求跟踪浏览器。MinIO Object Key、
+Access Key 和 Secret 从不进入 API Schema 或模型 Prompt。
+
+### 15. 文档状态轮询
 
 前端轮询 `GET /knowledge-bases/{id}/documents` 获取实时处理状态（PENDING → … → READY/FAILED），把后台 Worker 的进度展示给用户。
 

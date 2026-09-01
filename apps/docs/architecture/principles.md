@@ -63,6 +63,9 @@ UltimateRAG 领域模型 → LangChain Adapter → LangChain
 
 推论：理论上 `MinIO + PostgreSQL` 可以重建 Milvus 索引；业务状态绝不能只存在 Milvus。
 
+此外，Worker 会把最终 Chunk 导出到本地 `data/chunk_snapshots/`，供人工检查切块质量。它是
+可重建的明文诊断副本，不参与检索，也不改变上述三类核心存储的事实边界。
+
 ## 5. 统一文档模型（RAG Core 不感知格式）
 
 RAG 核心不应该关心原始格式。所有格式都先转成统一模型：
@@ -91,7 +94,8 @@ parsed_document = await parser.parse(source)
 
 ## 6. 状态一致性：未完成的文档绝不可用
 
-文档只有 **Parse → Chunk → Embed → Index 全部成功**后，才进入 `READY`：
+文档只有 **Parse → Chunk/Asset → Snapshot → Embed → Index 全部成功**后，才进入 `READY`。
+Snapshot 沿用 `CHUNKING` 状态，不额外扩展公开状态机：
 
 ```text
 PENDING → PARSING → CHUNKING → EMBEDDING → INDEXING → READY

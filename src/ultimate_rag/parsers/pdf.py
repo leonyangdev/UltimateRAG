@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import TYPE_CHECKING, Protocol
+from uuid import NAMESPACE_URL, uuid5
 
 import pypdfium2 as pdfium  # type: ignore[import-untyped]
 from PIL import Image
@@ -26,6 +27,7 @@ from ultimate_rag.domain.models import (
     BlockType,
     DocumentSource,
     JsonValue,
+    ParsedAsset,
     ParsedDocument,
     SourceLocator,
 )
@@ -303,10 +305,15 @@ class DoclingPDFLayoutAnalyzer:
 
 
 class PDFParser:
-    """组合本地版面分析、百炼扫描 OCR 与嵌入图片理解。"""
+    """组合本地版面分析、百炼扫描 OCR、图片理解与资源抽取。
+
+    Parser 会把图片的标题、Vision 描述和 ``asset://`` 标记放回原阅读位置，同时把经过
+    限制的 JPEG 作为 ``ParsedAsset`` 返回。它不直接访问 MinIO；应用层只有在摄取任务中
+    才把资源持久化，因此 Parser 仍可脱离基础设施独立测试。
+    """
 
     name = "pdf-docling"
-    version = "2.2"
+    version = "3.0"
     _EXTENSIONS = frozenset({".pdf"})
     _MIME_TYPES = frozenset({"application/pdf"})
     _MAX_PAGES = 500
@@ -367,8 +374,25 @@ class PDFParser:
         return supports_source(source, self._EXTENSIONS, self._MIME_TYPES)
 
     async def parse(self, source: DocumentSource) -> ParsedDocument:
-        """按页选择布局或 OCR 路径，并保留阅读顺序、页码与 BBox。"""
+        """按页选择布局或 OCR 路径，并产出可检索、可渲染的统一结果。
 
+        Args:
+            source: 已通过扩展名、MIME 和上传大小校验的 PDF 原始快照。
+
+        Returns:
+            按阅读顺序排列的 Block，以及与 IMAGE Block 关联的 JPEG Asset。图片 Block
+            同时包含视觉描述与稳定 ``asset://`` Markdown，后续生成模型无需猜测 URL。
+
+        Raises:
+            InvalidDocumentError: PDF 损坏、页数越界或没有任何可索引内容。
+            RuntimeError: 本地版面模型或远程 OCR/Vision 整页处理失败。
+
+        Side Effects:
+            文字型图片与扫描页可能调用百炼 OCR/Vision；本方法不写数据库或对象存储。
+        """
+
+        # 阶段 1：PDFium 先做轻量页级路由，只把确认为扫描件的页面渲染成 JPEG。
+        # 文字页交给 Docling，避免扫描 OCR 丢失分栏、表格和标题层级。
         pages = await asyncio.to_thread(self._inspect_pages, source.content)
         scanned_pages = frozenset(page.number for page in pages if page.rendered_image is not None)
         layout_elements: list[_LayoutElement] = []
@@ -385,15 +409,18 @@ class PDFParser:
         for element in resolved_layout:
             elements_by_page.setdefault(element.page, []).append(element)
 
+        # 阶段 2：图片理解与扫描 OCR 都在有界并发内完成。此时 _LayoutElement 仍保留裁图
+        # 字节，直到下面建立稳定 Asset；旧实现正是在此处只留下描述而丢掉了可展示图片。
         scan_results = await self._ocr_scanned_pages(pages)
         blocks: list[Block] = []
+        assets: list[ParsedAsset] = []
         fallback_page_count = 0
         for page in pages:
             page_elements = sorted(
                 elements_by_page.get(page.number, []), key=lambda item: item.order
             )
             if page.number in scan_results:
-                text, extraction = scan_results[page.number]
+                text, extraction, image = scan_results[page.number]
                 if text:
                     page_elements = [
                         _LayoutElement(
@@ -403,6 +430,7 @@ class PDFParser:
                             text,
                             SourceLocator(page=page.number),
                             {"extraction": extraction},
+                            image=image,
                         )
                     ]
             elif not page_elements and page.native_text.strip():
@@ -424,39 +452,97 @@ class PDFParser:
                 content = element.content.strip()
                 if not content:
                     continue
-                blocks.append(
-                    stable_block(
-                        source.document_id,
-                        len(blocks),
-                        element.block_type,
-                        content,
-                        element.locator,
-                        element.metadata,
-                    )
+                metadata = dict(element.metadata)
+
+                # 阶段 3：图片资源 ID 只依赖文档、阅读顺序和原文位置，重试会得到同一 Object。
+                # Markdown 中保留 asset:// 标记，既表达图片在原文中的位置，也让 LLM 能输出
+                # 受控资源引用；真正 HTTP 地址由 API/前端映射，不能由模型自由拼接。
+                asset_id: str | None = None
+                asset_title = ""
+                asset_description = content
+                if element.block_type is BlockType.IMAGE and element.image is not None:
+                    asset_id = self._asset_id(source.document_id, element)
+                    asset_title = self._asset_title(element, content)
+                    markdown_title = asset_title.replace("[", "（").replace("]", "）")
+                    content = f"![{markdown_title}](asset://{asset_id})\n\n图片解读：\n{content}"
+                    metadata["asset_ids"] = [asset_id]
+                    metadata["asset_title"] = asset_title
+
+                block = stable_block(
+                    source.document_id,
+                    len(blocks),
+                    element.block_type,
+                    content,
+                    element.locator,
+                    metadata,
                 )
+                blocks.append(block)
+                if asset_id is not None and element.image is not None:
+                    assets.append(
+                        ParsedAsset(
+                            id=asset_id,
+                            block_id=block.id,
+                            kind=BlockType.IMAGE,
+                            media_type="image/jpeg",
+                            filename=f"{asset_id}.jpg",
+                            title=asset_title,
+                            description=asset_description,
+                            content=element.image,
+                            locator=element.locator,
+                        )
+                    )
 
         if not blocks:
             raise InvalidDocumentError("PDF 没有可索引的文本、表格、图片语义或 OCR 结果")
         return ParsedDocument(
             document_id=source.document_id,
             blocks=tuple(blocks),
+            assets=tuple(assets),
             metadata={
                 "parser": self.name,
                 "parser_version": self.version,
                 "page_count": len(pages),
                 "scan_page_count": len(scanned_pages),
                 "ocr_page_count": sum(
-                    "ocr" in extraction for _text, extraction in scan_results.values()
+                    "ocr" in extraction for _text, extraction, _image in scan_results.values()
                 ),
                 "scan_vision_page_count": sum(
-                    "vision" in extraction for _text, extraction in scan_results.values()
+                    "vision" in extraction for _text, extraction, _image in scan_results.values()
                 ),
                 "table_count": sum(block.type == BlockType.TABLE for block in blocks),
                 "image_count": sum(block.type == BlockType.IMAGE for block in blocks),
                 "fallback_page_count": fallback_page_count,
                 "layout_engine": "docling",
+                "asset_count": len(assets),
             },
         )
+
+    @staticmethod
+    def _asset_id(document_id: str, element: _LayoutElement) -> str:
+        """根据稳定版面位置生成可跨重试复用的 Asset ID。"""
+
+        bbox = element.locator.bbox or ()
+        return str(
+            uuid5(
+                NAMESPACE_URL,
+                f"{document_id}:asset:{element.page}:{element.order}:{bbox}:image",
+            )
+        )
+
+    @staticmethod
+    def _asset_title(element: _LayoutElement, description: str) -> str:
+        """优先使用原题注，否则从 Vision 描述提取简短、可访问的图片标题。"""
+
+        if element.caption.strip():
+            return " ".join(element.caption.split())[:500]
+        first_line = next(
+            (line.strip("#* -") for line in description.splitlines() if line.strip()),
+            "",
+        )
+        title = first_line or f"PDF 第 {element.page} 页图片"
+        # Vision 有时把整段空间关系写在第一行。描述全文仍用于 Embedding 和来源面板，但标题
+        # 必须适合作为 Markdown alt text 与图片卡片标签，避免数百字标题破坏布局和读屏体验。
+        return title if len(title) <= 120 else f"{title[:117].rstrip()}..."
 
     async def _resolve_layout_images(
         self,
@@ -521,18 +607,22 @@ class PDFParser:
                         "extraction": extraction or "docling_caption",
                         "caption": element.caption,
                     },
+                    image=element.image,
                     caption=element.caption,
                 )
 
         values = await asyncio.gather(*(resolve(element) for element in elements))
         return [value for value in values if value is not None]
 
-    async def _ocr_scanned_pages(self, pages: list[_PDFPage]) -> dict[int, tuple[str, str]]:
-        """有界并发解析扫描页；稀疏 OCR 页面追加 Vision 以保留图形关系。"""
+    async def _ocr_scanned_pages(
+        self,
+        pages: list[_PDFPage],
+    ) -> dict[int, tuple[str, str, bytes]]:
+        """有界并发解析扫描页，并保留用于展示的整页 JPEG Asset。"""
 
         semaphore = asyncio.Semaphore(self._vision_concurrency)
 
-        async def recognize(page: _PDFPage) -> tuple[int, str, str] | None:
+        async def recognize(page: _PDFPage) -> tuple[int, str, str, bytes] | None:
             if page.rendered_image is None:
                 return None
             async with semaphore:
@@ -583,10 +673,10 @@ class PDFParser:
                     )
                     if value
                 )
-                return page.number, content, extraction
+                return page.number, content, extraction, page.rendered_image
 
         values = await asyncio.gather(*(recognize(page) for page in pages))
-        return {value[0]: (value[1], value[2]) for value in values if value is not None}
+        return {value[0]: (value[1], value[2], value[3]) for value in values if value is not None}
 
     def _inspect_pages(self, content: bytes) -> list[_PDFPage]:
         """用 PDFium 验证 PDF、识别低文本页，并只渲染需要百炼 OCR 的页面。"""

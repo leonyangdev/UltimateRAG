@@ -48,6 +48,9 @@ async def test_chunker_splits_oversized_paragraph() -> None:
 
     assert len(chunks) > 1
     assert all(chunk.token_count <= 100 for chunk in chunks)
+    assert len({chunk.metadata["parent_id"] for chunk in chunks}) == 1
+    assert [chunk.metadata["parent_child_index"] for chunk in chunks] == list(range(len(chunks)))
+    assert all(chunk.metadata["parent_child_count"] == len(chunks) for chunk in chunks)
 
 
 @pytest.mark.asyncio
@@ -135,3 +138,27 @@ async def test_chunker_merges_bboxes_without_crossing_page_boundary() -> None:
     assert chunks[0].locator is not None
     assert chunks[0].locator.bbox == (10, 20, 120, 80)
     assert chunks[1].locator is not None and chunks[1].locator.page == 2
+
+
+@pytest.mark.asyncio
+async def test_chunker_keeps_asset_ids_on_atomic_image_chunk() -> None:
+    """图片的 asset:// 标记与稳定 ID 必须随专用 Chunk 一起进入事实元数据。"""
+
+    parsed = ParsedDocument(
+        document_id="pdf-assets",
+        blocks=(
+            Block(
+                "image-block",
+                BlockType.IMAGE,
+                "![Transformer](asset://asset-1)\n\n图片解读：Encoder 与 Decoder 架构。",
+                SourceLocator(page=3, bbox=(10, 20, 300, 400)),
+                {"asset_ids": ["asset-1"]},
+            ),
+        ),
+    )
+
+    chunks = await StructureAwareMarkdownChunker(100, 12).split(parsed, "kb-1")
+
+    assert len(chunks) == 1
+    assert chunks[0].metadata["asset_ids"] == ["asset-1"]
+    assert chunks[0].metadata["block_types"] == ["IMAGE"]

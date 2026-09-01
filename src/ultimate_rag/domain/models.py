@@ -38,6 +38,21 @@ class IngestionJobStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class ChatRole(StrEnum):
+    """持久化会话允许进入模型上下文的角色。"""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class ChatMessageStatus(StrEnum):
+    """一次生成的提交状态；PENDING 同时承担单会话并发闸门。"""
+
+    PENDING = "PENDING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+
+
 class BlockType(StrEnum):
     """统一文档模型中可由不同 Parser 产生的语义块类型。"""
 
@@ -48,6 +63,25 @@ class BlockType(StrEnum):
     QUOTE = "QUOTE"
     TABLE = "TABLE"
     IMAGE = "IMAGE"
+
+
+class RetrievalMode(StrEnum):
+    """V3 对外提供的检索策略；模式只决定召回通道，不绑定具体向量库。"""
+
+    DENSE = "dense"
+    SPARSE = "sparse"
+    HYBRID = "hybrid"
+
+
+class RetrievalIntent(StrEnum):
+    """决定检索证据组织方式的用户任务意图。
+
+    普通事实问答需要按相关性收敛到少量证据；全文总结需要跨章节覆盖。两者若共用同一个
+    Top-K 排名，摘要、实验和结论很容易被局部高相似片段或参考文献挤出上下文。
+    """
+
+    FACT = "fact"
+    DOCUMENT_SUMMARY = "document_summary"
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,11 +187,53 @@ class Block:
 
 @dataclass(frozen=True, slots=True)
 class ParsedDocument:
-    """统一解析结果，使后续切块逻辑无需感知原始文件格式。"""
+    """统一解析结果，使后续切块逻辑无需感知原始文件格式。
+
+    ``assets`` 保存 Parser 从原文抽取出的可展示二进制资源。Parser 只生成稳定 ID 和内存字节，
+    不知道 MinIO Object Key；对象存储持久化仍由应用层摄取管线负责。
+    """
 
     document_id: str
     blocks: tuple[Block, ...]
     metadata: dict[str, JsonValue] = field(default_factory=dict)
+    # assets 放在 metadata 之后，保留旧调用方把第三个位置参数作为 metadata 的兼容语义。
+    assets: tuple["ParsedAsset", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedAsset:
+    """Parser 抽取出的待持久化视觉资源。
+
+    图片语义已经写入关联 Block，``content`` 只承载经过格式与大小限制的二进制，不进入
+    Embedding。稳定 ``id`` 同时出现在 Block metadata 和 Markdown ``asset://`` 标记中。
+    """
+
+    id: str
+    block_id: str
+    kind: BlockType
+    media_type: str
+    filename: str
+    title: str
+    description: str
+    content: bytes
+    locator: SourceLocator | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentAsset:
+    """已由 MinIO 与 PostgreSQL 共同持久化的文档资源事实。"""
+
+    id: str
+    document_id: str
+    block_id: str
+    kind: BlockType
+    object_key: str
+    media_type: str
+    filename: str
+    title: str
+    description: str
+    sha256: str
+    locator: SourceLocator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,8 +260,41 @@ class EmbeddedChunk:
 
 
 @dataclass(frozen=True, slots=True)
+class RetrievalOptions:
+    """一次检索请求的高级策略与安全过滤条件。
+
+    ``top_k`` 仍由服务方法显式接收，因为它描述调用方需要多少最终结果；``candidate_k``
+    则描述进入融合/重排的召回宽度。二者分开后，可以扩大候选池而不把全部候选塞进 LLM。
+    """
+
+    mode: RetrievalMode = RetrievalMode.HYBRID
+    candidate_k: int = 30
+    enable_query_rewrite: bool = True
+    enable_rerank: bool = True
+    enable_parent_expansion: bool = True
+    document_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """拒绝绕过 API Schema 直接调用应用服务时传入的无界参数。"""
+
+        if not isinstance(self.mode, RetrievalMode):
+            raise ValueError("mode must be a RetrievalMode")
+        if not 1 <= self.candidate_k <= 100:
+            raise ValueError("candidate_k must be between 1 and 100")
+        if len(self.document_ids) > 50:
+            raise ValueError("document_ids cannot contain more than 50 values")
+        if any(not value.strip() for value in self.document_ids):
+            raise ValueError("document_ids cannot contain empty values")
+
+
+@dataclass(frozen=True, slots=True)
 class RetrievalResult:
-    """向量检索命中结果，保留答案引用所需的完整来源信息。"""
+    """高级检索命中结果，保留各阶段分数与最终上下文来源。
+
+    ``score`` 始终表示当前排序实际使用的最终分数；它可能来自 Dense、BM25、RRF 或
+    Reranker，因此不能跨模式、跨查询直接比较。各阶段原始分数使用独立可选字段保留，
+    Retrieval Playground 可以据此解释排序变化，而不需要了解 Milvus SDK 的响应结构。
+    """
 
     chunk_id: str
     knowledge_base_id: str
@@ -195,6 +304,80 @@ class RetrievalResult:
     heading_path: tuple[str, ...]
     score: float
     locator: SourceLocator | None = None
+    dense_score: float | None = None
+    sparse_score: float | None = None
+    fusion_score: float | None = None
+    rerank_score: float | None = None
+    retrieval_sources: tuple[str, ...] = ()
+    matched_content: str | None = None
+    context_chunk_ids: tuple[str, ...] = ()
+    # 类型来自 PostgreSQL Chunk 事实而不是 Milvus 派生索引。前端据此区分正文、表格和
+    # 图片语义块；新增默认值保持旧索引与第三方 VectorStore 实现向后兼容。
+    content_types: tuple[BlockType, ...] = ()
+    # Asset 元数据来自 PostgreSQL，二进制仍留在 MinIO。模型只会看到稳定 asset:// ID，
+    # API Schema 再把它映射为受控内容端点，绝不暴露内部 Object Key。
+    assets: tuple[DocumentAsset, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentPreview:
+    """从原始文档可信定位渲染出的只读证据预览。"""
+
+    content: bytes
+    media_type: str
+    etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentAssetContent:
+    """从对象存储读取、可安全映射为 HTTP 响应的资源内容。"""
+
+    content: bytes
+    media_type: str
+    filename: str
+    etag: str
+
+
+@dataclass(frozen=True, slots=True)
+class RerankResult:
+    """Reranker 返回的最小稳定结果，避免供应商响应结构进入应用层。"""
+
+    chunk_id: str
+    score: float
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalTrace:
+    """一次高级检索的轻量解释信息，不承担 V5 全链路可观测性职责。"""
+
+    original_query: str
+    query_variants: tuple[str, ...]
+    mode: RetrievalMode
+    candidate_count: int
+    result_count: int
+    rewrite_applied: bool
+    rerank_applied: bool
+    parent_expansion_applied: bool
+    fallback_reasons: tuple[str, ...] = ()
+    intent: RetrievalIntent = RetrievalIntent.FACT
+    strategy: str = "ranked_retrieval"
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalRun:
+    """高级检索结果与其解释信息的组合，供调试 API 和 RAG 生成共同复用。"""
+
+    results: tuple[RetrievalResult, ...]
+    trace: RetrievalTrace
+
+
+@dataclass(frozen=True, slots=True)
+class ChatEvidence:
+    """随助手消息持久化的检索快照，使历史会话仍可打开来源与图片。"""
+
+    citations: tuple["Citation", ...]
+    results: tuple[RetrievalResult, ...]
+    trace: RetrievalTrace
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +389,7 @@ class Citation:
     chunk_id: str
     heading_path: tuple[str, ...]
     locator: SourceLocator | None = None
+    context_chunk_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,3 +437,42 @@ class IngestionJob:
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSession:
+    """绑定单个知识库的持久化对话及其派生长期记忆。"""
+
+    id: str
+    knowledge_base_id: str
+    title: str
+    memory_summary: str
+    memory_through_sequence: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChatMessage:
+    """会话中的原始消息事实；摘要只做缓存，不能替代这些记录。"""
+
+    id: str
+    session_id: str
+    sequence: int
+    role: ChatRole
+    status: ChatMessageStatus
+    content: str
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    evidence: ChatEvidence | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurn:
+    """原子开启的一轮对话及生成前已经完成的历史消息。"""
+
+    session: ChatSession
+    user_message: ChatMessage
+    assistant_message: ChatMessage
+    history: tuple[ChatMessage, ...]

@@ -4,7 +4,7 @@
 
 ## 1. 这一层是什么
 
-Infrastructure 层是**外部依赖的具体实现**：PostgreSQL、MinIO、Milvus、模型 API 都在这里被适配成领域端口。它被 Domain 反向依赖（Domain 定义端口，Infrastructure 实现端口）。
+Infrastructure 层是**外部依赖的具体实现**：PostgreSQL、MinIO、Milvus、PDFium、模型 API 都在这里被适配成领域端口。它被 Domain 反向依赖（Domain 定义端口，Infrastructure 实现端口）。
 
 ```text
 Interface
@@ -20,7 +20,7 @@ Infrastructure（PostgreSQL / MinIO / Milvus / 模型 API）
 
 ### 2.1 表结构（`database/models.py`）
 
-四个 SQLAlchemy 模型对应四张 PostgreSQL 表：
+八个 SQLAlchemy 模型对应八张 PostgreSQL 表：
 
 | 表 | 保存内容 | 关键约束 |
 |---|---|---|
@@ -28,6 +28,9 @@ Infrastructure（PostgreSQL / MinIO / Milvus / 模型 API）
 | `documents` | 文档元数据 + 处理状态 | `object_key` 唯一；级联 Chunk/任务 |
 | `ingestion_jobs` | 持久化任务 + 租约 | `document_id` 唯一；索引 `(status, available_at)` |
 | `chunks` | Chunk 事实（可重建 Milvus） | `heading_path` / `chunk_metadata` 用 JSONB |
+| `document_assets` | 图片题名、描述、Locator、MinIO Key、SHA-256 | `id` 稳定；按文档/Block 索引 |
+| `chat_sessions` | 会话标题、消息序号、递归摘要游标 | 按知识库索引 |
+| `chat_messages` | 完整消息 + Retrieval Evidence 快照 | `(session_id, sequence)` 唯一 |
 
 关键设计：
 
@@ -48,6 +51,9 @@ claim_ingestion_job            # FOR UPDATE SKIP LOCKED 领任务
 heartbeat_ingestion_job        # 续租
 complete_ingestion_job / fail_ingestion_job
 replace_chunks                 # 先删后插，事务内保证重试不重复
+replace_document_assets        # 资源元数据先删后插；对象 Key 由应用稳定生成
+get_document_assets            # Retrieval 一次批量补齐 Asset，避免 N+1
+requeue_document               # 行锁内重置终态文档和唯一任务
 update_document_status         # 状态 + error_message 同事务
 list_ready_document_ids        # 检索过滤用
 ```
@@ -64,7 +70,7 @@ list_ready_document_ids        # 检索过滤用
 
 ```python
 ensure_bucket()   # 幂等创建 Bucket
-put(object_key, content, content_type)   # 上传原始文件
+put(object_key, content, content_type)   # 上传原始文件或抽取 Asset
 get(object_key) -> bytes                 # 读取并关闭 HTTP 连接
 delete(object_key)                       # 删除（键由应用生成）
 ```
@@ -72,6 +78,18 @@ delete(object_key)                       # 删除（键由应用生成）
 - MinIO SDK 是同步接口 → 全部 `asyncio.to_thread`，不阻塞事件循环
 - `get()` 用 `finally` 保证 `response.close()` + `release_conn()`，防止连接池泄漏
 - **目标键只能由应用生成**，不能直接来自用户文件名（路径穿越防护）
+
+### 3.1 持久化图片与动态 PDF 预览的分工
+
+- IMAGE Block：摄取期保存独立 JPEG Asset，答案可通过稳定 ID 直接展示；
+- TABLE/普通正文：保留 Markdown 和 `page + bbox`，需要核验时从原 PDF 动态裁切；
+- 两条路径都不把 MinIO Key 放进 Milvus，HTTP 只能按已登记 Asset ID 或 Chunk ID 读取。
+
+### 3.2 PDF 证据渲染（`pdf_preview.py`）
+
+`PDFiumPreviewRenderer` 实现 `PDFPreviewRenderer` 端口。它用服务端固定倍率和留白把可信
+`page + bbox` 转为 JPEG，坐标夹紧在真实页面范围内；CPU 栅格化通过 `asyncio.to_thread`
+执行。输入只来自 PostgreSQL Chunk 定位，外部 API 不允许传任意坐标或倍率。
 
 ## 4. 依赖装配（`runtime.py` —— Composition Root）
 
@@ -102,13 +120,16 @@ def create_processing_runtime(settings) -> ProcessingRuntime:
 - **`close()`** 释放 SQLAlchemy 连接池
 - 不引入 DI 框架：当前依赖数量有限，显式装配即可
 
-## 5. 四个表里谁是真来源
+## 5. 三类存储里谁是真来源
 
 | 存储 | 是否真来源 | 说明 |
 |---|---|---|
-| PostgreSQL | ✅ 事实来源 | 文档、任务、Chunk 事实 |
-| MinIO | ✅ 原始文件 | 可排查、可重建一切派生数据 |
+| PostgreSQL | ✅ 事实来源 | 文档、任务、Chunk、Asset 元数据、会话证据 |
+| MinIO | ✅ 对象来源 | 原始文件和抽取图片，可排查、可重建 |
 | Milvus | ❌ 派生索引 | 可由 PostgreSQL Chunk + Embedder 重建 |
+
+`LocalChunkSnapshotStore` 另行保存 Embedding 前 JSON，便于人工审查。它是可重建诊断副本，
+不是业务事实来源；API 删除文档/知识库时会同步清理这份明文。
 
 ## 下一步
 
